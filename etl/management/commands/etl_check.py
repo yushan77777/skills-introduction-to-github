@@ -149,32 +149,26 @@ class Command(BaseCommand):
 
     # -- checks -----------------------------------------------------------
     def _check_environment(self) -> None:
-        """What the ETL subprocess will actually see.
+        """What the ETL subprocess will see.
 
-        A service inherits almost nothing from a login shell, so an unset
-        SPARK_HOME or PYSPARK_PYTHON here is the usual reason a run that works
-        by hand fails from the web application.
+        Spark is configured from ``config/config.yaml`` alone, so nothing here
+        is expected to be set and nothing is reported as missing. The values
+        are listed because they are still worth seeing when diagnosing a run —
+        an unset SPARK_HOME simply means PySpark uses its own bundled Spark.
+        Use ``manage.py spark_check`` to test the Spark configuration itself.
         """
         runtime = runtime_env.build(SETTINGS)
         for problem in runtime.problems:
             self._line(BAD, "environment source", problem)
         self._line(OK, "sources", ", ".join(runtime.sources))
-
-        if not SETTINGS.env_script and not SETTINGS.env_file:
-            self._line(WARN, "ETL_ENV_SCRIPT",
-                       "not set — the ETL inherits only this process's "
-                       "environment. Under systemd that is nearly empty; set "
-                       "ETL_ENV_SCRIPT to the file operators source before "
-                       "running the ETL by hand.")
+        self._line(OK, "Spark configuration",
+                   "read from config/config.yaml only — no environment "
+                   "variable configures Spark")
 
         rows = dict(runtime_env.describe(runtime.values))
         for key in ("SPARK_HOME", "JAVA_HOME", "PYSPARK_PYTHON",
                     "SPARK_CONF_DIR", "SPARK_LOCAL_IP", "LD_LIBRARY_PATH"):
-            if key in rows:
-                self._line(OK, key, rows[key])
-            else:
-                level = WARN if key in ("SPARK_HOME", "JAVA_HOME") else OK
-                self._line(level, key, "not set")
+            self._line(OK, key, rows.get(key, "not set"))
         for key, value in rows.items():
             if key not in ("SPARK_HOME", "JAVA_HOME", "PYSPARK_PYTHON",
                            "SPARK_CONF_DIR", "SPARK_LOCAL_IP", "LD_LIBRARY_PATH"):

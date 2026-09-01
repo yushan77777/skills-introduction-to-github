@@ -74,6 +74,26 @@ PATTERNS: list[tuple[re.Pattern, Cause]] = [
              "version does not match the master's Spark version (compare the "
              "'PySpark …' line at the top of this log with the Spark master UI).")),
 
+    (re.compile(r"Master removed our application"), Cause(
+        code="spark_app_removed",
+        summary="The master accepted the application and then removed it, so "
+                "it reached the cluster but did not survive there.",
+        hint="Unlike a registration failure, this one IS visible in the master "
+             "UI — look it up there for the master's own reason. The usual one "
+             "is that the master could not open a connection back to the "
+             "driver, which the 'resolves to a loopback address' warning "
+             "earlier in this log would show.")),
+
+    (re.compile(r"resolves to a loopback address"), Cause(
+        code="spark_driver_host_guessed",
+        summary="This host's name resolves to a loopback address, so Spark "
+                "guessed which address to advertise to the master.",
+        hint="If the guess is wrong the master cannot call the driver back and "
+             "the application never starts. Fix this host's entry in "
+             "/etc/hosts so its name resolves to the address the Spark network "
+             "reaches it on.",
+        primary=False)),
+
     (re.compile(r"Cannot assign requested address"), Cause(
         code="spark_bind_address",
         summary="The driver could not bind to the address Spark chose for it.",

@@ -39,6 +39,7 @@ etl/                        NEW  — ETL console
 │   worker.py                 the subprocess that calls the real run_etl()
 │   etl_config.py             read-only view of the ETL's config.yaml
 │   diagnostics.py            names the likely cause of a failed run
+│   spark_preflight.py        Spark connectivity probe, run by spark_check
 │   runtime_env.py            rebuilds the ETL's Linux environment
 │   security.py               credential redaction
 │   views.py / urls.py        page + JSON API
@@ -396,8 +397,8 @@ The ETL variables that matter:
 |---|---|---|
 | `ETL_PROJECT_ROOT` | the existing ETL project directory | `<APP_ROOT>/etl_project` |
 | `ETL_PYTHON` | the existing runtime with PySpark and the Oracle client | the interpreter running Django |
-| `ETL_ENV_SCRIPT` | shell script sourced to rebuild the ETL's Linux environment — **set this on any real server**, see §10.3 | none |
-| `ETL_ENV_FILE` | extra `KEY=VALUE` lines merged on top of it | none |
+| `ETL_ENV_SCRIPT` | optional shell script sourced for the ETL subprocess — not needed, see §10.3 | none |
+| `ETL_ENV_FILE` | optional extra `KEY=VALUE` lines — not needed | none |
 | `ETL_LOG_DIR` | where per-run logs and the lock file go | `<ETL_PROJECT_ROOT>/logs` |
 | `ETL_MODULE` | entry point module | `etl_table_manual` |
 | `ETL_ENTRYPOINT` | entry point function | `run_etl` |
@@ -408,60 +409,65 @@ The ETL variables that matter:
 `ETL_PYTHON` should point at the **existing** ETL virtualenv. Do not build a
 new one if a working one exists — see §11.
 
-### 10.3 The ETL's Linux environment
+### 10.3 Spark configuration
 
-This is the one that bites. The ETL needs more than an interpreter: Spark needs
-`SPARK_HOME` and `SPARK_CONF_DIR` to find its installation and
-`spark-defaults.conf`, `JAVA_HOME` for the JVM, `PYSPARK_PYTHON` so the
-executors use the same interpreter as the driver, `SPARK_LOCAL_IP` on a
-multi-homed host so the master can call the driver back, and the Oracle client
-needs `LD_LIBRARY_PATH` and possibly `TNS_ADMIN`.
+**Spark is configured from `etl_project/config/config.yaml` and nowhere else.**
+`build_spark()` reads `spark_properties` — master URL, connector jars,
+executor instances, memory, cores, driver memory — and the ETL app sets no
+Spark environment variable and passes no override. There is nothing to keep in
+sync between the YAML and the service environment, because the service
+environment does not configure Spark.
 
-When someone runs the ETL by hand, all of that comes from their login shell.
-**A systemd service gets almost none of it**, and a run that inherits that
-empty environment typically fails with
-`All masters are unresponsive! Giving up.` — a Spark session with no cluster
-behind it.
-
-So point `ETL_ENV_SCRIPT` at the same file the operators source before running
-the ETL by hand:
+Check it before trusting it:
 
 ```bash
-ETL_ENV_SCRIPT=/analyticsShare/yushan/04.daily_use/5.all_etl/etl-env.sh
+./venv/bin/python manage.py spark_check
 ```
 
-It is sourced in a clean bash and everything it exports is passed to the ETL
-subprocess. Plain assignments work as well as `export`, and a script that
-prints a banner is fine — only the resulting environment is captured. If no
-such file exists, write one:
+That runs the ETL run minus the ETL: a session built by the project's **own**
+`build_spark` from `config.yaml`, then one trivial job that needs a real
+executor. A failure there is unambiguously Spark's; a success means the next
+failure is not. It reports:
 
-```bash
-# etl-env.sh — the environment the ETL has always needed
-export SPARK_HOME=/data/spark-4.0.0-bin-hadoop3
-export SPARK_CONF_DIR=$SPARK_HOME/conf
-export JAVA_HOME=/usr/lib/jvm/java-11-openjdk
-export PYSPARK_PYTHON=/analyticsShare/.../venv/bin/python
-export PYSPARK_DRIVER_PYTHON=$PYSPARK_PYTHON
-export SPARK_LOCAL_IP=<this host's address on the Spark network>
-export LD_LIBRARY_PATH=/usr/lib/oracle/12.2/client64/lib:$LD_LIBRARY_PATH
-export PATH=$SPARK_HOME/bin:$PATH
-```
+| Check | What it tells you |
+|---|---|
+| `master_url` | what `spark_properties` actually says |
+| TCP probe of the master | whether the port is reachable from this host at all |
+| cluster Spark version, alive workers, free cores | read from the master's own web UI and `/json/` |
+| every jar in `spark_properties.jars` | whether it exists and this user can read it |
+| client PySpark version | and whether its major/minor matches the cluster's |
+| `spark.driver.host` | the address the driver advertises for the master to call back on |
+| driver `java.io.tmpdir` | `build_spark` hard-codes one; whether it exists and is writable here |
+| **whether the master ever listed the application** | the decisive one — see below |
 
-`ETL_ENV_FILE` takes plain `KEY=VALUE` lines (systemd `EnvironmentFile`
-format) and is merged on top, for the one or two things that differ per host.
+That last check answers the symptom directly. **Nothing at all in the Spark
+master UI** means the registration never arrived, which narrows it to the
+network route or a client/cluster version mismatch — not a driver call-back
+problem. An application that **appears and then fails** means registration did
+arrive, and the fault is downstream of it, with the master's own reason visible
+in its UI.
 
-Layering, later winning: the web process's environment → `ETL_ENV_SCRIPT` →
-`ETL_ENV_FILE`. `PYTHONPATH` is special-cased — the ETL project root is
-*prepended* to whatever the script sets, never substituted for it.
+Add `--verbose-spark` to see Spark's own output, `--ui-port` if the master web
+UI is not on 8080, and `--timeout` to change how long it waits (Spark gives up
+on registration after about 60 seconds, so allow more than that).
 
-Every run log starts with the environment the ETL actually received, and
-`manage.py etl_check` prints the same thing plus a TCP probe of the Spark
-master, so neither has to be guessed at.
+#### If the driver's address is the problem
 
-> `ETL_ENV_SCRIPT` runs a shell script as the service user. It is server-side
-> configuration — set in the systemd environment file, never reachable from
-> the browser — and carries the same trust as `ETL_PYTHON`, which is also
-> executed. Nothing in the web application can choose or alter it.
+Spark logs `Your hostname, <host>, resolves to a loopback address … using
+<address> instead`, and if that guess is wrong the master cannot call the
+driver back. Fix it **without** an environment variable by correcting this
+host's entry in `/etc/hosts` so its name resolves to the address the Spark
+network reaches it on. `spark_check` reports the hostname, what it resolves
+to, and what the driver ended up advertising.
+
+#### The two environment hooks
+
+`ETL_ENV_SCRIPT` and `ETL_ENV_FILE` exist for a host that needs something set
+before Python starts — a dynamic-linker path, say. **Leave them unset.** The
+supplied ETL needs neither: `oracle_connect.py` passes `lib_dir` to
+`init_oracle_client` explicitly rather than relying on `LD_LIBRARY_PATH`, and
+Spark takes everything from the YAML. They are documented in
+`deploy/environment.example` and default to off.
 
 ### 10.4 Required directories and permissions
 
@@ -500,7 +506,8 @@ Set `X-Forwarded-For` as it does, or every history row will say `127.0.0.1`.
 ./venv/bin/python manage.py test etl
 ```
 
-`etl_check` prints the project paths, the environment the ETL will actually
+`spark_check` is the one to run when Spark itself is suspect (§10.3).
+`etl_check` prints the project paths, the environment the ETL will
 receive, the discovered jobs with their stages and required parameters, every
 connection profile with its credential state, a TCP probe of the Spark master,
 and whether a run is in progress — without starting anything and without
@@ -565,7 +572,9 @@ reports directly.
 | Run fails instantly with "missing a dependency" | `ETL_PYTHON` is the Django venv, not the ETL runtime | point `ETL_PYTHON` at the existing ETL interpreter |
 | `DPI-1047` / Oracle client errors | Instant Client missing at the hard-coded path | install it at `/usr/lib/oracle/12.2/client64/lib` |
 | "Encrypted, but pass1.pkl does not decrypt it" | that profile's password was encrypted with a different key | re-encrypt it: `python src/utils/encrypt_module.py '<password>'` |
-| **`All masters are unresponsive! Giving up.`** after ~1 minute | the Spark driver started but never registered with the master — the UI names this as the likely cause automatically | three causes, in order: (1) `ETL_ENV_SCRIPT` not set, so no `SPARK_HOME`/`SPARK_LOCAL_IP` — see §10.3; (2) the master is not reachable from this host — `etl_check` probes the port; (3) the PySpark version does not match the master's Spark version — the run log's `PySpark x.y.z from …` line against the master UI's version |
+| **`All masters are unresponsive! Giving up.`** after ~1 minute, and **nothing in the Spark master UI** | the registration never reached the master | run `manage.py spark_check`. If it too reports the master never listed the application, it is the network route to `master_url` or a client/cluster Spark version mismatch — both of which that command checks directly |
+| The application **appears** in the master UI and then fails | registration arrived; the master could not keep it | usually the master cannot open a connection back to the driver. `spark_check` reports `spark.driver.host` and the hostname resolution behind it — see §10.3 |
+| `Master removed our application: FAILED` | the master gave up after repeated executor failures | the master UI shows the executors' own error. A driver `java.io.tmpdir` that the ETL user cannot write to is one cause; `spark_check` checks that path |
 | `Py4JJavaError … NoSuchElementException: None.get` in `BasicWriteJobStatsTracker` | not a separate fault — `BasicWriteJobStatsTracker.metrics` is `SparkContext.getActive.get`, so this is a write running with no active context | fix whatever stopped the session (the row above, usually); the UI reports that as the likely cause and shows this only as the reported error |
 | `ClassNotFoundException: org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions` | `spark-defaults.conf` sets `spark.sql.extensions`, but `build_spark` replaces `spark.jars` with the list from `config.yaml`, which has no Iceberg jar | a warning, not fatal. Add the Iceberg jar to `spark_properties.jars`, or drop the extension from `spark-defaults.conf` |
 | `Service 'SparkUI' could not bind on port 4040/4041` | other Spark drivers are already running on the host | a warning; Spark takes the next free port |
@@ -716,11 +725,11 @@ the Fernet key.
 8. `TQDM_MININTERVAL=0` is set for the ETL subprocess so no stage transition is
    dropped from the display. It affects only how often the existing progress
    bar repaints.
-9. **The ETL's environment must be supplied explicitly** through
-   `ETL_ENV_SCRIPT` / `ETL_ENV_FILE`. The web application cannot infer what a
-   login shell would have set, and inheriting a service's near-empty
-   environment is the usual cause of a Spark session with no cluster behind
-   it. See §10.3.
+9. **Spark is configured from `config.yaml` alone.** No environment variable
+   configures Spark, and the ETL app sets none. Anything Spark needs that the
+   YAML has no key for — `spark.driver.host`, for instance — has to be solved
+   at the host level (name resolution) or by adding it to `build_spark`, which
+   is ETL code and was left untouched. See §10.3.
 
 ---
 
@@ -730,7 +739,7 @@ the Fernet key.
 MONITORING_CONFIG=config.demo.ini ./venv/bin/python manage.py test etl
 ```
 
-101 tests covering discovery against the real ETL source, the registry and the
+113 tests covering discovery against the real ETL source, the registry and the
 kwargs it builds, validation, credential redaction, step-bar parsing, and — via
 a fixture ETL project shaped like the real one — the full run lifecycle,
 failure handling, the one-at-a-time rule (including a four-way race), stop, the

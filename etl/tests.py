@@ -781,6 +781,28 @@ class DiagnosticsTests(SimpleTestCase):
                      "INFO Importing etl_table_manual"):
             self.assertIsNone(diagnostics.scan(line), line)
 
+    def test_the_master_side_failures_are_recognised(self):
+        removed = diagnostics.scan(
+            "26/09/01 10:35:58 ERROR StandaloneSchedulerBackend: Application "
+            "has been killed. Reason: Master removed our application: FAILED")
+        self.assertEqual(removed.code, "spark_app_removed")
+        self.assertTrue(removed.primary)
+        self.assertIn("IS visible in the master UI", removed.hint)
+
+        guessed = diagnostics.scan(
+            "26/09/01 10:33:08 WARN Utils: Your hostname, vm, resolves to a "
+            "loopback address: 127.0.0.1; using 192.0.2.2 instead")
+        self.assertEqual(guessed.code, "spark_driver_host_guessed")
+        self.assertFalse(guessed.primary,
+                         "Spark corrects this itself, so it is not the fault "
+                         "unless nothing else explains the failure")
+
+    def test_a_registration_failure_outranks_a_host_warning(self):
+        warning = diagnostics.scan("WARN Utils: Your hostname, vm, resolves "
+                                   "to a loopback address: 127.0.0.1")
+        self.assertTrue(diagnostics.better(diagnostics.scan(self.MASTERS),
+                                           warning))
+
     def test_the_other_known_failures_are_recognised(self):
         cases = {
             "DPI-1047: Cannot locate a 64-bit Oracle Client library":
@@ -860,6 +882,77 @@ class RootCauseOnARunTests(RunnerTestCase):
         self.assertEqual(run.status, COMPLETED)
         self.assertIsNone(run.root_cause)
         self.assertIsNone(run.snapshot()["root_cause"])
+
+
+# ---------------------------------------------------------------------------
+# Spark connectivity check
+# ---------------------------------------------------------------------------
+
+class SparkCheckParsingTests(SimpleTestCase):
+    """The parsing the spark_check command depends on."""
+
+    def test_a_standalone_master_url_is_split_into_host_and_port(self):
+        from etl.management.commands.spark_check import _parse_master
+        self.assertEqual(_parse_master("spark://192.168.125.79:7077"),
+                         [("192.168.125.79", 7077)])
+
+    def test_the_default_port_is_applied(self):
+        from etl.management.commands.spark_check import _parse_master
+        self.assertEqual(_parse_master("spark://host"), [("host", 7077)])
+
+    def test_a_high_availability_master_list_is_split(self):
+        from etl.management.commands.spark_check import _parse_master
+        self.assertEqual(
+            _parse_master("spark://h1:7077,h2:7078"),
+            [("h1", 7077), ("h2", 7078)])
+
+    def test_a_non_standalone_url_yields_nothing_to_probe(self):
+        from etl.management.commands.spark_check import _parse_master
+        for url in ("local[*]", "yarn", "k8s://https://host:6443", ""):
+            self.assertEqual(_parse_master(url), [], url)
+
+    def test_the_cluster_version_is_read_from_the_master_page(self):
+        """Spark renders the version with layout classes alongside it."""
+        from etl.management.commands.spark_check import _UI_VERSION
+        page = '<span class="version me-3">4.2.0</span>'
+        self.assertEqual(_UI_VERSION.search(page).group(1), "4.2.0")
+        older = '<span class="version" style="margin-right: 15px;">3.5.1</span>'
+        self.assertEqual(_UI_VERSION.search(older).group(1), "3.5.1")
+
+    def test_the_master_url_is_read_from_the_yaml_and_nowhere_else(self):
+        from etl import etl_config
+        self.assertEqual(etl_config.spark_master_url(real_settings()),
+                         "spark://192.168.125.79:7077")
+
+    def test_a_missing_config_file_yields_no_master_url(self):
+        from etl import etl_config
+        self.assertEqual(
+            etl_config.spark_master_url(
+                real_settings(project_root=Path("/nonexistent"))), "")
+
+
+class SparkPreflightTests(SimpleTestCase):
+    def test_jars_are_reported_with_their_readability(self):
+        from etl import spark_preflight
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".jar") as jar:
+            rows = spark_preflight.describe_jars(
+                f"{jar.name}, /nonexistent/missing.jar")
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(rows[0]["exists"] and rows[0]["readable"])
+        self.assertFalse(rows[1]["exists"])
+
+    def test_an_empty_jar_list_is_not_an_error(self):
+        from etl import spark_preflight
+        self.assertEqual(spark_preflight.describe_jars(""), [])
+        self.assertEqual(spark_preflight.describe_jars(None), [])
+
+    def test_the_preflight_script_is_shipped_and_standalone(self):
+        """It runs under ETL_PYTHON, so it must not import the etl package."""
+        from etl import spark_preflight
+        source = Path(spark_preflight.__file__).read_text()
+        self.assertNotIn("from .", source)
+        self.assertNotIn("import etl", source)
 
 
 # ---------------------------------------------------------------------------

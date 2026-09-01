@@ -46,9 +46,9 @@ TimeoutStopSec=30
 # the sandbox stays deliberately loose. Do not add ProtectHome or a strict
 # ReadWritePaths without checking every path in config.yaml first.
 #
-# Note that the ETL does NOT get its Spark and Oracle environment from here:
-# this unit's environment is nearly empty by design. It is rebuilt for the ETL
-# subprocess from ETL_ENV_SCRIPT — see README section 10.3.
+# Spark is not configured from this unit's environment, and does not need to
+# be: build_spark() reads every Spark setting from spark_properties in the
+# ETL's own config/config.yaml. See README section 10.3.
 NoNewPrivileges=yes
 PrivateTmp=no
 
