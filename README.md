@@ -42,7 +42,7 @@ etl/                        NEW  — ETL console
 │   views.py / urls.py        page + JSON API
 │   management/commands/etl_check.py
 │
-templates/                  base.html + Monitoring templates      (base.html: 2 lines changed)
+templates/                  base.html + Monitoring templates      (base.html: 5 lines)
 static/                     site.css, diskusage.js                (unchanged)
 etl_project/                the reconstructed ETL source — the thing that runs
 deploy/                     systemd unit, gunicorn config, nginx example
@@ -79,7 +79,7 @@ speaks to Greenplum through psycopg2, and still supports the sqlite demo mode.
 | Change | Why |
 |---|---|
 | `/` now shows the landing page; the Monitoring launcher moved to `/monitoring/` | The platform needs one entry point offering both applications |
-| `templates/base.html`: brand links to `/`, nav gains an **ETL** link, brand text is now "ETL & Monitoring" | One navigation across both applications |
+| `templates/base.html`: brand links to `/`, brand text and page title become "ETL & Monitoring", nav "Home" is relabelled "Monitoring" and gains an **ETL** link, plus an empty `{% block styles %}` for app stylesheets | One navigation and one identity across both applications. Five lines changed, one block added |
 | `settings.py`: `portal` and `etl` added to `INSTALLED_APPS` | Registering the new apps |
 | `settings.py`: `SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS` read the environment, falling back to the previous literals | Needed to run with `DEBUG=0` in production without editing the file. Behaviour with no environment set is identical to before |
 
@@ -88,8 +88,15 @@ their exact URLs, so existing links and bookmarks still work. The
 `home:index` and `disk_usage:index` URL names are unchanged, so no Monitoring
 template needed rewriting. No Monitoring view, model or query was touched.
 
-`etl/tests.py` contains a `PlatformIntegrationTests` case that fails if any of
-that stops being true.
+**Every other Monitoring file is byte-identical to the supplied application** —
+`home/`, `disk_usage/` (including `gp.py`), `templates/home/index.html`,
+`templates/disk_usage/index.html`, `static/css/site.css`,
+`static/js/diskusage.js`, `scripts/make_demo_data.py`, `manage.py`,
+`monitoring_site/wsgi.py` and `monitoring_site/asgi.py`. Verify it against the
+original with `cmp`.
+
+`etl/tests.py` contains a `PlatformIntegrationTests` case that fails if the
+URLs, names or pages stop behaving as they did.
 
 ---
 
