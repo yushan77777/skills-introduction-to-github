@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+
+{% block title %}Home · System Monitor{% endblock %}
+{% block nav_home %}active{% endblock %}
+
+{% block content %}
+<div class="home-hero">
+  <h1>System Monitor</h1>
+  <p class="home-sub">One place for the health of your servers. Pick an app to get started.</p>
+</div>
+
+<div class="app-grid">
+  {% for app in apps %}
+    {% if app.available %}
+      <a class="app-card" href="{% url app.url_name %}">
+        <div class="app-card-icon">
+          {% if app.icon == "disk" %}
+          <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true">
+            <ellipse cx="12" cy="6" rx="8" ry="3" fill="none" stroke="currentColor" stroke-width="2"/>
+            <path d="M4 6v12c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="none" stroke="currentColor" stroke-width="2"/>
+            <path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3" fill="none" stroke="currentColor" stroke-width="2"/>
+          </svg>
+          {% endif %}
+        </div>
+        <h2>{{ app.name }}</h2>
+        <p>{{ app.description }}</p>
+        <span class="app-card-cta">Open →</span>
+      </a>
+    {% else %}
+      <div class="app-card app-card-disabled">
+        <div class="app-card-icon">
+          <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true">
+            <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h2>{{ app.name }}</h2>
+        <p>{{ app.description }}</p>
+      </div>
+    {% endif %}
+  {% endfor %}
+</div>
+{% endblock %}

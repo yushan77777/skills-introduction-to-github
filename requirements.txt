@@ -1,0 +1,23 @@
+# ---------------------------------------------------------------------------
+# Web application dependencies (the process that serves Django)
+# ---------------------------------------------------------------------------
+# Install these into the venv that runs manage.py / gunicorn.
+#
+# The ETL itself does NOT run in this environment: the ETL app launches it as
+# a subprocess under ETL_PYTHON, which is the existing Linux runtime that
+# already has PySpark and the Oracle client. Keeping the heavy ETL stack out
+# of here is deliberate — see etl_project/requirements-etl.txt.
+
+# Monitoring — unchanged from the original monitoring_web_app requirements.
+Django>=5.2,<6.0
+psycopg2-binary>=2.9
+
+# ETL app — reads the ETL's config.yaml for the read-only configuration
+# summary and the connection-key dropdowns.
+PyYAML>=6.0
+
+# ETL app — used only to verify that config/pickle/pass1.pkl still decrypts
+# the encrypted passwords in config.yaml, reported on the Configuration panel.
+# The ETL runtime needs this package anyway; without it here the check simply
+# reports "not verified" instead of failing.
+cryptography>=41.0
