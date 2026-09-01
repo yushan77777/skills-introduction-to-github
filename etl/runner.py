@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
+from . import runtime_env
 from .security import Redactor, strip_sensitive
 from .settings import SETTINGS, EtlSettings
 from .worker import ERROR_PREFIX, RESULT_PREFIX
@@ -367,6 +368,10 @@ class ETLRunner:
             "module": self.settings.etl_module,
             "entrypoint": self.settings.etl_entrypoint,
             "params": kwargs,
+            # Reported by the worker at the top of every run log, so a
+            # missing SPARK_HOME or a wrong PYSPARK_PYTHON is visible without
+            # having to reproduce the failure.
+            "env_report_keys": list(runtime_env.RUNTIME_ENV_KEYS),
         }
 
         try:
@@ -395,7 +400,19 @@ class ETLRunner:
                          f"Set ETL_PYTHON to the interpreter that has PySpark."}
             raise ETLStartError(run.error["message"])
 
-        env = os.environ.copy()
+        # The ETL's own Linux environment — SPARK_HOME, JAVA_HOME,
+        # PYSPARK_PYTHON, LD_LIBRARY_PATH for the Oracle client, and anything
+        # else it needs. A service inherits almost none of this, so it is
+        # rebuilt from the sources the administrator configured.
+        runtime = runtime_env.build(settings)
+        if runtime.problems:
+            run.error = {"type": "EnvironmentError",
+                         "message": runtime.problems[0]}
+            for problem in runtime.problems:
+                run.append(problem, stream="err")
+            raise ETLStartError(run.error["message"])
+
+        env = runtime.values
         env["PYTHONUNBUFFERED"] = "1"
         # tqdm suppresses a redraw that lands within `mininterval` (0.1s by
         # default) of the previous one, which silently drops the step bar's
@@ -403,12 +420,15 @@ class ETLRunner:
         # ETL announces reach the UI. It changes only how often the existing
         # progress bar repaints — never what the ETL does.
         env.setdefault("TQDM_MININTERVAL", "0")
+        # Prepend rather than replace: an environment script may legitimately
+        # put its own directories on PYTHONPATH.
         existing = env.get("PYTHONPATH", "")
         root = str(settings.project_root)
         env["PYTHONPATH"] = f"{root}{os.pathsep}{existing}" if existing else root
 
         run.append(f"Starting {run.label} ({run.etl_key})")
         run.append(f"Log file: {run.log_path}")
+        run.append(f"Environment from: {', '.join(runtime.sources)}")
 
         try:
             proc = subprocess.Popen(

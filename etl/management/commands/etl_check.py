@@ -16,7 +16,7 @@ from pathlib import Path
 
 from django.core.management.base import BaseCommand
 
-from etl import etl_config
+from etl import etl_config, runtime_env
 from etl.discovery import discover
 from etl.registry import build_job
 from etl.runner import RUNNER
@@ -24,6 +24,32 @@ from etl.settings import SETTINGS
 
 OK, WARN, BAD = "ok", "warning", "error"
 MARK = {OK: "  ok  ", WARN: " warn ", BAD: " FAIL "}
+
+
+def _parse_spark_master(url: str) -> list[tuple[str, int]]:
+    """``spark://h1:7077,h2:7077`` -> ``[(h1, 7077), (h2, 7077)]``."""
+    if not url.startswith("spark://"):
+        return []
+    out = []
+    for authority in url[len("spark://"):].split("/")[0].split(","):
+        authority = authority.strip()
+        if not authority:
+            continue
+        host, _, port = authority.partition(":")
+        try:
+            out.append((host, int(port or 7077)))
+        except ValueError:
+            continue
+    return out
+
+
+def _probe(host: str, port: int, timeout: float = 4.0) -> tuple[bool, str]:
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True, ""
+    except OSError as exc:
+        return False, f"{exc.__class__.__name__}: {exc}"
 
 
 class Command(BaseCommand):
@@ -51,6 +77,9 @@ class Command(BaseCommand):
         self._check_path("ETL runtime", Path(SETTINGS.python_executable), "exe")
         self._check_path("Configuration file", SETTINGS.config_yaml_path, "file")
         self._check_writable("Log directory", SETTINGS.log_dir)
+
+        self._section("ETL runtime environment")
+        self._check_environment()
 
         self._section("Job discovery")
         discovery = discover(SETTINGS)
@@ -88,6 +117,9 @@ class Command(BaseCommand):
                            f"{profile['kind']}, {profile['endpoint']} — "
                            f"{profile['credential']}")
 
+        self._section("Spark master")
+        self._check_spark_master()
+
         self._section("Run slot")
         active = RUNNER.active_run()
         foreign = RUNNER.foreign_lock()
@@ -114,6 +146,70 @@ class Command(BaseCommand):
                 f"profile will fail when they try to connect."))
         else:
             self.stdout.write(self.style.SUCCESS("Everything checks out."))
+
+    # -- checks -----------------------------------------------------------
+    def _check_environment(self) -> None:
+        """What the ETL subprocess will actually see.
+
+        A service inherits almost nothing from a login shell, so an unset
+        SPARK_HOME or PYSPARK_PYTHON here is the usual reason a run that works
+        by hand fails from the web application.
+        """
+        runtime = runtime_env.build(SETTINGS)
+        for problem in runtime.problems:
+            self._line(BAD, "environment source", problem)
+        self._line(OK, "sources", ", ".join(runtime.sources))
+
+        if not SETTINGS.env_script and not SETTINGS.env_file:
+            self._line(WARN, "ETL_ENV_SCRIPT",
+                       "not set — the ETL inherits only this process's "
+                       "environment. Under systemd that is nearly empty; set "
+                       "ETL_ENV_SCRIPT to the file operators source before "
+                       "running the ETL by hand.")
+
+        rows = dict(runtime_env.describe(runtime.values))
+        for key in ("SPARK_HOME", "JAVA_HOME", "PYSPARK_PYTHON",
+                    "SPARK_CONF_DIR", "SPARK_LOCAL_IP", "LD_LIBRARY_PATH"):
+            if key in rows:
+                self._line(OK, key, rows[key])
+            else:
+                level = WARN if key in ("SPARK_HOME", "JAVA_HOME") else OK
+                self._line(level, key, "not set")
+        for key, value in rows.items():
+            if key not in ("SPARK_HOME", "JAVA_HOME", "PYSPARK_PYTHON",
+                           "SPARK_CONF_DIR", "SPARK_LOCAL_IP", "LD_LIBRARY_PATH"):
+                self._line(OK, key, value if len(value) < 160
+                           else value[:157] + "...")
+
+    def _check_spark_master(self) -> None:
+        """Can this host open a TCP connection to the configured master?
+
+        "All masters are unresponsive" in a run log means registration never
+        completed. This separates "cannot reach the port at all" (network,
+        wrong URL, master down) from "reached it but registration was refused"
+        (usually a Spark version mismatch between the client and the master).
+        """
+        url = etl_config.spark_master_url(SETTINGS)
+        if not url:
+            self._line(WARN, "master_url",
+                       "not found in config.yaml spark_properties")
+            return
+        self._line(OK, "master_url", url)
+
+        endpoints = _parse_spark_master(url)
+        if not endpoints:
+            self._line(OK, "reachability",
+                       f"not a spark:// standalone URL — nothing to probe")
+            return
+
+        for host, port in endpoints:
+            reachable, detail = _probe(host, port)
+            if reachable:
+                self._line(OK, f"{host}:{port}", "accepted a connection")
+            else:
+                self._line(BAD, f"{host}:{port}",
+                           f"{detail}. The ETL will fail with 'All masters "
+                           f"are unresponsive'.")
 
     # -- output helpers ---------------------------------------------------
     def _section(self, title: str) -> None:

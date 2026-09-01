@@ -33,6 +33,23 @@ ETL_PROJECT_ROOT=/analyticsShare/yushan/04.daily_use/5.all_etl/v1
 # Instant Client. This is NOT the venv Django runs in.
 ETL_PYTHON=/analyticsShare/yushan/04.daily_use/5.all_etl/venv/bin/python
 
+# The ETL's Linux environment. SET THIS — it is the difference between a run
+# that works from a shell and one that works from the web application.
+#
+# systemd hands a service an almost empty environment, so without this the ETL
+# starts with no SPARK_HOME, no SPARK_CONF_DIR, no JAVA_HOME, no
+# PYSPARK_PYTHON, no SPARK_LOCAL_IP and no LD_LIBRARY_PATH for the Oracle
+# client. Spark then builds a session that never registers with the master and
+# the run dies a minute later with "All masters are unresponsive".
+#
+# Point it at the file operators already source before running the ETL by
+# hand; everything it exports is passed to the ETL subprocess. See README 10.3.
+ETL_ENV_SCRIPT=/analyticsShare/yushan/04.daily_use/5.all_etl/etl-env.sh
+
+# Optional: extra KEY=VALUE lines merged on top of the script, for the one or
+# two things that differ per host.
+# ETL_ENV_FILE=/etc/etl-monitoring/etl-runtime.env
+
 # Where per-run logs are written. Must be writable by the service user.
 # Defaults to <ETL_PROJECT_ROOT>/logs when unset.
 ETL_LOG_DIR=/var/log/etl-monitoring

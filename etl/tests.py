@@ -28,6 +28,7 @@ from django.urls import reverse
 
 from . import registry, validation
 from .discovery import discover
+from . import runtime_env
 from .runner import COMPLETED, FAILED, RUNNING, STOPPED, ETLBusy, ETLRunner
 from .security import Redactor, mask_url_credentials, strip_sensitive
 from .settings import BASE_DIR, EtlSettings
@@ -37,6 +38,8 @@ REAL_PROJECT = BASE_DIR / "etl_project"
 
 def real_settings(**overrides) -> EtlSettings:
     base = dict(
+        env_script="",
+        env_file="",
         project_root=REAL_PROJECT,
         etl_module="etl_table_manual",
         etl_entrypoint="run_etl",
@@ -342,6 +345,7 @@ def _count(line):
 
 FIXTURE_ETL = textwrap.dedent('''
     """Fixture with the same shape as etl_table_manual.py."""
+    import os
     import sys
     import time
     from tqdm.auto import tqdm
@@ -379,6 +383,8 @@ FIXTURE_ETL = textwrap.dedent('''
             if etl_name == "fast_job":
                 if not (source and target):
                     raise ValueError("fast_job requires: source, target")
+                print("MARKER=" + str(os.environ.get("ETL_TEST_MARKER")))
+                print("SPARK_HOME=" + str(os.environ.get("SPARK_HOME")))
                 for step in STEP_MAP[etl_name]:
                     bar.next(step)
                     print(f"working on {step} with secret={secret}")
@@ -680,6 +686,209 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+# ---------------------------------------------------------------------------
+# The ETL's Linux environment
+# ---------------------------------------------------------------------------
+
+class EnvFileTests(SimpleTestCase):
+    def write(self, text: str) -> Path:
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".env", delete=False)
+        tmp.write(text)
+        tmp.close()
+        self.addCleanup(os.unlink, tmp.name)
+        return Path(tmp.name)
+
+    def test_key_value_lines_are_read(self):
+        path = self.write("SPARK_HOME=/opt/spark\nJAVA_HOME=/usr/lib/jvm/java\n")
+        self.assertEqual(runtime_env.parse_env_file(path),
+                         {"SPARK_HOME": "/opt/spark",
+                          "JAVA_HOME": "/usr/lib/jvm/java"})
+
+    def test_comments_blank_lines_export_and_quotes_are_handled(self):
+        path = self.write(
+            "# a comment\n\n"
+            "export SPARK_HOME=/opt/spark\n"
+            'PYSPARK_SUBMIT_ARGS="--master local[2] pyspark-shell"\n'
+            "EMPTY=\n")
+        values = runtime_env.parse_env_file(path)
+        self.assertEqual(values["SPARK_HOME"], "/opt/spark")
+        self.assertEqual(values["PYSPARK_SUBMIT_ARGS"],
+                         "--master local[2] pyspark-shell")
+        self.assertEqual(values["EMPTY"], "")
+
+    def test_a_malformed_line_is_reported_with_its_number(self):
+        path = self.write("SPARK_HOME=/opt/spark\nthis is not an assignment\n")
+        with self.assertRaises(runtime_env.EnvError) as ctx:
+            runtime_env.parse_env_file(path)
+        self.assertIn("line 2", str(ctx.exception))
+
+    def test_a_missing_file_is_reported(self):
+        with self.assertRaises(runtime_env.EnvError):
+            runtime_env.parse_env_file(Path("/nonexistent/etl.env"))
+
+
+class EnvScriptTests(SimpleTestCase):
+    def write(self, text: str) -> Path:
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False)
+        tmp.write(text)
+        tmp.close()
+        self.addCleanup(os.unlink, tmp.name)
+        return Path(tmp.name)
+
+    def test_exports_are_captured(self):
+        path = self.write("export SPARK_HOME=/opt/spark-4.0.0\n"
+                          "export PYSPARK_PYTHON=/opt/venv/bin/python\n")
+        values = runtime_env.capture_script_env(path)
+        self.assertEqual(values["SPARK_HOME"], "/opt/spark-4.0.0")
+        self.assertEqual(values["PYSPARK_PYTHON"], "/opt/venv/bin/python")
+
+    def test_plain_assignments_are_captured_too(self):
+        # `set -a` means a script written without `export` still works.
+        values = runtime_env.capture_script_env(self.write("JAVA_HOME=/usr/java\n"))
+        self.assertEqual(values["JAVA_HOME"], "/usr/java")
+
+    def test_a_script_that_prints_a_banner_does_not_corrupt_the_capture(self):
+        path = self.write('echo "Loading the ETL environment..."\n'
+                          "export SPARK_HOME=/opt/spark\n")
+        values = runtime_env.capture_script_env(path)
+        self.assertEqual(values["SPARK_HOME"], "/opt/spark")
+        self.assertNotIn("Loading", " ".join(values))
+
+    def test_a_failing_script_is_reported_not_silently_ignored(self):
+        path = self.write("echo 'no such module' >&2\nexit 3\n")
+        with self.assertRaises(runtime_env.EnvError) as ctx:
+            runtime_env.capture_script_env(path)
+        self.assertIn("no such module", str(ctx.exception))
+
+    def test_a_missing_script_is_reported(self):
+        with self.assertRaises(runtime_env.EnvError):
+            runtime_env.capture_script_env(Path("/nonexistent/env.sh"))
+
+
+class RuntimeEnvBuildTests(SimpleTestCase):
+    def write(self, suffix: str, text: str) -> Path:
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False)
+        tmp.write(text)
+        tmp.close()
+        self.addCleanup(os.unlink, tmp.name)
+        return Path(tmp.name)
+
+    def test_without_configuration_the_web_environment_is_used(self):
+        result = runtime_env.build(real_settings())
+        self.assertEqual(result.problems, [])
+        self.assertEqual(result.sources, ["web application environment"])
+        self.assertEqual(result.values.get("PATH"), os.environ.get("PATH"))
+
+    def test_the_file_wins_over_the_script_which_wins_over_the_process(self):
+        script = self.write(".sh", "export LAYER=script\nexport ONLY_SCRIPT=yes\n")
+        env_file = self.write(".env", "LAYER=file\nONLY_FILE=yes\n")
+        result = runtime_env.build(real_settings(
+            env_script=str(script), env_file=str(env_file)))
+        self.assertEqual(result.problems, [])
+        self.assertEqual(result.values["LAYER"], "file")
+        self.assertEqual(result.values["ONLY_SCRIPT"], "yes")
+        self.assertEqual(result.values["ONLY_FILE"], "yes")
+        self.assertIn("PATH", result.values, "the base environment is kept")
+        self.assertEqual(len(result.sources), 3)
+
+    def test_a_broken_source_is_reported_rather_than_raising(self):
+        result = runtime_env.build(real_settings(env_script="/nonexistent/env.sh"))
+        self.assertTrue(result.problems)
+        self.assertIn("ETL_ENV_SCRIPT", result.problems[0])
+
+    def test_describe_masks_a_credential_named_variable(self):
+        rows = dict(runtime_env.describe(
+            {"SPARK_HOME": "/opt/spark", "PATH": "/usr/bin"}))
+        self.assertEqual(rows["SPARK_HOME"], "/opt/spark")
+        rows = dict(runtime_env.describe({"SPARK_HOME": "/opt/spark"}))
+        self.assertNotIn("JAVA_HOME", rows, "absent variables are not invented")
+
+    def test_a_credential_named_variable_is_never_printed(self):
+        original = runtime_env.RUNTIME_ENV_KEYS
+        runtime_env.RUNTIME_ENV_KEYS = original + ("ETL_TEST_PASSWORD",)
+        self.addCleanup(setattr, runtime_env, "RUNTIME_ENV_KEYS", original)
+        rows = dict(runtime_env.describe({"ETL_TEST_PASSWORD": "hunter22"}))
+        self.assertNotIn("hunter22", rows["ETL_TEST_PASSWORD"])
+        self.assertIn("8 characters", rows["ETL_TEST_PASSWORD"])
+
+
+class EnvironmentReachesTheEtlTests(RunnerTestCase):
+    """The point of all of the above: the ETL process must actually see it."""
+
+    def write_script(self, text: str) -> Path:
+        path = Path(self.tmp.name) / "etl-env.sh"
+        path.write_text(text)
+        return path
+
+    def run_fixture(self, **setting_overrides):
+        self.settings_obj = real_settings(
+            project_root=Path(self.tmp.name), log_dir=Path(self.tmp.name) / "logs",
+            python_executable=sys.executable, stop_timeout=15, **setting_overrides)
+        self.runner = ETLRunner(self.settings_obj)
+        run = self.runner.submit(
+            fixture_job("fast_job", self.steps),
+            {"etl_name": "fast_job", "source": "s", "target": "t"}, "tester")
+        self.wait_for(run)
+        return run
+
+    def test_an_env_script_reaches_the_etl_process(self):
+        script = self.write_script(
+            "export ETL_TEST_MARKER=from-the-script\n"
+            "export SPARK_HOME=/opt/spark-4.0.0\n")
+        run = self.run_fixture(env_script=str(script))
+
+        self.assertEqual(run.status, COMPLETED)
+        log = Path(run.log_path).read_text()
+        self.assertIn("MARKER=from-the-script", log)
+        self.assertIn("SPARK_HOME=/opt/spark-4.0.0", log)
+
+    def test_an_env_file_reaches_the_etl_process(self):
+        path = Path(self.tmp.name) / "etl.env"
+        path.write_text("ETL_TEST_MARKER=from-the-file\n")
+        run = self.run_fixture(env_file=str(path))
+        self.assertIn("MARKER=from-the-file", Path(run.log_path).read_text())
+
+    def test_the_environment_header_is_written_to_every_run_log(self):
+        run = self.run_fixture()
+        log = Path(run.log_path).read_text()
+        self.assertIn("env PATH =", log)
+        self.assertIn("Python runtime:", log)
+        self.assertIn("PySpark", log, "the PySpark build must be reported")
+
+    def test_the_source_of_the_environment_is_recorded_on_the_run(self):
+        script = self.write_script("export ETL_TEST_MARKER=x\n")
+        run = self.run_fixture(env_script=str(script))
+        text = " ".join(line.text for line in run.logs)
+        self.assertIn("Environment from:", text)
+        self.assertIn("ETL_ENV_SCRIPT", text)
+
+    def test_a_broken_env_script_fails_the_start_and_frees_the_slot(self):
+        from .runner import ETLStartError
+        self.settings_obj = real_settings(
+            project_root=Path(self.tmp.name), log_dir=Path(self.tmp.name) / "logs",
+            python_executable=sys.executable,
+            env_script=str(self.write_script("exit 4\n")))
+        runner = ETLRunner(self.settings_obj)
+        with self.assertRaises(ETLStartError) as ctx:
+            runner.submit(fixture_job("fast_job", self.steps),
+                          {"etl_name": "fast_job", "source": "s", "target": "t"},
+                          "tester")
+        self.assertIn("ETL_ENV_SCRIPT", str(ctx.exception))
+        self.assertIsNone(runner.active_run())
+        self.assertIsNone(runner.foreign_lock())
+        self.assertEqual(runner.history()[0]["status"], FAILED)
+
+    def test_the_project_root_is_still_prepended_to_a_scripts_pythonpath(self):
+        script = self.write_script("export PYTHONPATH=/opt/shared/lib\n")
+        run = self.run_fixture(env_script=str(script))
+        log = Path(run.log_path).read_text()
+        self.assertIn(f"env PYTHONPATH = {self.tmp.name}", log)
+        self.assertIn("/opt/shared/lib", log)
 
 
 # ---------------------------------------------------------------------------

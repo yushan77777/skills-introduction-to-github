@@ -58,6 +58,11 @@ class EtlSettings:
     log_buffer: int
     #: Seconds to wait for a killed process group to actually disappear.
     stop_timeout: float
+    #: Shell script sourced to rebuild the ETL's Linux environment. Point it
+    #: at whatever the operators source before running the ETL by hand.
+    env_script: str = ""
+    #: ``KEY=VALUE`` file merged on top of that (systemd EnvironmentFile format).
+    env_file: str = ""
 
     @property
     def config_yaml_path(self) -> Path:
@@ -91,6 +96,8 @@ def get_settings() -> EtlSettings:
         history_size=_int_env("ETL_HISTORY_SIZE", 50),
         log_buffer=_int_env("ETL_LOG_BUFFER", 4000),
         stop_timeout=float(_int_env("ETL_STOP_TIMEOUT", 10)),
+        env_script=_env("ETL_ENV_SCRIPT"),
+        env_file=_env("ETL_ENV_FILE"),
     )
 
 

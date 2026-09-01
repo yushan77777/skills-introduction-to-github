@@ -259,6 +259,22 @@ def summary() -> dict:
         return build_summary().as_dict()
 
 
+def spark_master_url(settings: EtlSettings = SETTINGS) -> str:
+    """``spark_properties.master_url`` from config.yaml, or "" if unreadable."""
+    path = settings.config_yaml_path
+    if not path.exists():
+        return ""
+    try:
+        import yaml
+        data = yaml.safe_load(path.read_text()) or {}
+    except Exception:
+        return ""
+    spark = data.get("spark_properties")
+    if isinstance(spark, dict):
+        return str(spark.get("master_url") or "")
+    return ""
+
+
 def config_keys() -> dict:
     """Connection profile names, grouped, for the form's dropdowns.
 

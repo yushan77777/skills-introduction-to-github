@@ -29,11 +29,60 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import traceback
 
 RESULT_PREFIX = "__ETL_RESULT__ "
 ERROR_PREFIX = "__ETL_ERROR__ "
+
+#: A variable whose *name* reads like a credential is reported as set rather
+#: than printed, so the environment header is safe to write into a log file.
+_CREDENTIAL_NAME = re.compile(r"(?i)(password|passwd|pwd|secret|token|api[_-]?key)")
+
+
+def _report_environment(logger: logging.Logger, keys: list) -> None:
+    """Log the runtime environment the ETL is actually about to use.
+
+    Almost every "it works from the shell but not from the web application"
+    failure is a variable that was in the operator's login shell and not in the
+    service's environment — an unset SPARK_HOME, a PYSPARK_PYTHON pointing at
+    the wrong interpreter, a missing LD_LIBRARY_PATH for the Oracle client.
+    Printing them at the top of every run turns a day of guessing into a
+    glance at the log.
+    """
+    logger.info("Python runtime: %s", sys.executable)
+    logger.info("Python version: %s", sys.version.split()[0])
+    for key in keys or []:
+        value = os.environ.get(key)
+        if value is None:
+            logger.info("env %s is NOT SET", key)
+        elif _CREDENTIAL_NAME.search(key):
+            logger.info("env %s = (set, %d characters)", key, len(value))
+        else:
+            logger.info("env %s = %s", key, value)
+
+
+def _report_pyspark(logger: logging.Logger) -> None:
+    """Log the PySpark build in use.
+
+    A client whose version does not match the Spark master registers, waits,
+    and then fails with "All masters are unresponsive", which says nothing
+    about versions. This line does.
+    """
+    try:
+        import pyspark
+    except Exception as exc:
+        logger.info("PySpark is not importable in this runtime (%s: %s)",
+                    exc.__class__.__name__, exc)
+        return
+    logger.info("PySpark %s from %s", getattr(pyspark, "__version__", "?"),
+                getattr(pyspark, "__file__", "?"))
+    home = os.environ.get("SPARK_HOME")
+    if not home:
+        logger.info("SPARK_HOME is not set — PySpark will use the Spark "
+                    "bundled with the package above, and will not read any "
+                    "spark-defaults.conf from an existing installation.")
 
 
 def _fail(message: str, exc_type: str = "Error", code: int = 2) -> int:
@@ -84,7 +133,8 @@ def main() -> int:
         sys.path.insert(0, project_root)
 
     logger.info("Working directory: %s", project_root)
-    logger.info("Python runtime: %s", sys.executable)
+    _report_environment(logger, payload.get("env_report_keys") or [])
+    _report_pyspark(logger)
     logger.info("Importing %s from the existing ETL project", module_name)
 
     try:

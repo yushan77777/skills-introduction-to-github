@@ -45,6 +45,10 @@ TimeoutStopSec=30
 # The ETL needs to reach Oracle, Greenplum, Spark and the shared filesystem, so
 # the sandbox stays deliberately loose. Do not add ProtectHome or a strict
 # ReadWritePaths without checking every path in config.yaml first.
+#
+# Note that the ETL does NOT get its Spark and Oracle environment from here:
+# this unit's environment is nearly empty by design. It is rebuilt for the ETL
+# subprocess from ETL_ENV_SCRIPT — see README section 10.3.
 NoNewPrivileges=yes
 PrivateTmp=no
 
