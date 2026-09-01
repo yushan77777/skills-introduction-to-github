@@ -613,8 +613,25 @@
 
     if (run.error_detail && run.error_detail.message) {
       box.className = "etl-result etl-result-error";
-      box.appendChild(el("div", "etl-result-title",
-        run.status === "stopped" ? "Stopped" : run.error_detail.type || "Error"));
+
+      // The recognised cause first: the exception the ETL raised is usually
+      // the last symptom rather than the fault.
+      if (run.root_cause) {
+        box.appendChild(el("div", "etl-result-title", "Likely cause"));
+        box.appendChild(el("div", "etl-cause-summary", run.root_cause.summary));
+        box.appendChild(el("div", "etl-cause-hint", run.root_cause.hint));
+        if (run.root_cause.evidence) {
+          var ev = el("div", "etl-cause-evidence");
+          ev.appendChild(el("span", "etl-cause-label", "From the log: "));
+          ev.appendChild(document.createTextNode(run.root_cause.evidence));
+          box.appendChild(ev);
+        }
+        box.appendChild(el("div", "etl-result-title etl-cause-divider",
+          "Reported error"));
+      } else {
+        box.appendChild(el("div", "etl-result-title",
+          run.status === "stopped" ? "Stopped" : run.error_detail.type || "Error"));
+      }
       box.appendChild(el("div", null, run.error_detail.message));
       box.hidden = false;
       return;

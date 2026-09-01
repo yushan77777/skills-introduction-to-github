@@ -26,7 +26,7 @@ from pathlib import Path
 from django.test import Client, TestCase, SimpleTestCase
 from django.urls import reverse
 
-from . import registry, validation
+from . import diagnostics, registry, validation
 from .discovery import discover
 from . import runtime_env
 from .runner import COMPLETED, FAILED, RUNNING, STOPPED, ETLBusy, ETLRunner
@@ -321,6 +321,28 @@ class ProgressParsingTests(SimpleTestCase):
         self.assertEqual(index, 3)
         self.assertEqual(name, "Finalize")
 
+    def test_output_printed_onto_the_bar_line_is_not_lost(self):
+        """tqdm redraws without a newline, so a print lands on the bar's line."""
+        run = _bare_run(self.STEPS)
+        runner = ETLRunner(real_settings(log_dir=Path("/tmp")))
+        runner._handle_line(run, (
+            "oracle_to_csv:  20%|##    | 1/5 [00:20<01:20,  1.0step/s, Read Oracle]"
+            "ERROR StandaloneSchedulerBackend: All masters are unresponsive!"))
+
+        self.assertEqual(run.step_name, "Read Oracle", "progress still parsed")
+        self.assertEqual(run.root_cause.code, "spark_master_unreachable",
+                         "the message on the same line must still be seen")
+        text = " ".join(line.text for line in run.logs)
+        self.assertIn("All masters are unresponsive", text)
+        self.assertNotIn("1/5", text, "the bar itself stays out of the log pane")
+
+    def test_a_bare_bar_adds_nothing_to_the_log(self):
+        run = _bare_run(self.STEPS)
+        runner = ETLRunner(real_settings(log_dir=Path("/tmp")))
+        runner._handle_line(run, "oracle_to_csv:  20%|##  | 1/5 [00:20<01:20,  1.0step/s]   ")
+        self.assertEqual(len(run.logs), 0)
+        self.assertEqual(run.step_index, 1)
+
     def test_an_unrecognised_name_does_not_move_the_strip_off_the_step_list(self):
         index, name = self.parse(
             "oracle_to_csv: |2/5 [00:03<00:04, 1.0step/s, Something Else]")
@@ -374,6 +396,7 @@ FIXTURE_ETL = textwrap.dedent('''
             "fast_job": ["Alpha", "Beta", "Gamma"],
             "slow_job": ["Alpha", "Beta", "Gamma"],
             "broken_job": ["Alpha", "Beta"],
+            "spark_job": ["Build Spark", "Write CSV"],
         }
         if etl_name not in STEP_MAP:
             raise ValueError(f"Unknown etl_name={etl_name}")
@@ -404,6 +427,22 @@ FIXTURE_ETL = textwrap.dedent('''
                     raise ValueError("broken_job requires: source")
                 bar.next("Alpha")
                 raise RuntimeError("the warehouse refused the connection")
+
+            if etl_name == "spark_job":
+                # The real sequence from a Spark standalone registration
+                # failure: the fatal line, then a minute later a write that
+                # trips over the context it stopped.
+                bar.next("Build Spark")
+                print("ERROR StandaloneSchedulerBackend: Application has been "
+                      "killed. Reason: All masters are unresponsive! Giving up.")
+                print("WARN StandaloneSchedulerBackend: Application ID is not "
+                      "initialized yet.")
+                bar.next("Write CSV")
+                raise RuntimeError(
+                    "An error occurred while calling o307.csv. : "
+                    "java.util.NoSuchElementException: None.get at "
+                    "scala.None$.get(Option.scala:529)")
+
         finally:
             bar.close()
 ''')
@@ -686,6 +725,141 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+# ---------------------------------------------------------------------------
+# Naming the cause of a failure
+# ---------------------------------------------------------------------------
+
+class DiagnosticsTests(SimpleTestCase):
+    """Every line below is verbatim output from a real failing run."""
+
+    MASTERS = ("26/09/01 09:10:13 ERROR StandaloneSchedulerBackend: Application "
+               "has been killed. Reason: All masters are unresponsive! Giving up.")
+    NONE_GET = ("Py4JJavaError: An error occurred while calling o307.csv. : "
+                "java.util.NoSuchElementException: None.get at "
+                "scala.None$.get(Option.scala:529)")
+
+    def test_the_master_registration_failure_is_recognised(self):
+        finding = diagnostics.scan(self.MASTERS)
+        self.assertIsNotNone(finding)
+        self.assertEqual(finding.code, "spark_master_unreachable")
+        self.assertTrue(finding.primary)
+        self.assertIn("ETL_ENV_SCRIPT", finding.hint)
+
+    def test_the_write_failure_is_recognised_as_a_symptom(self):
+        finding = diagnostics.scan(self.NONE_GET)
+        self.assertEqual(finding.code, "spark_context_not_active")
+        self.assertFalse(finding.primary,
+                         "None.get is a consequence, not the fault")
+        self.assertIn("downstream", finding.hint)
+
+    def test_the_evidence_line_is_kept(self):
+        self.assertIn("All masters are unresponsive",
+                      diagnostics.scan(self.MASTERS).evidence)
+
+    def test_the_root_cause_wins_when_it_is_seen_first(self):
+        first = diagnostics.scan(self.MASTERS)
+        second = diagnostics.scan(self.NONE_GET)
+        self.assertFalse(diagnostics.better(second, first),
+                         "a symptom must not displace the cause")
+
+    def test_the_root_cause_wins_even_when_it_is_seen_second(self):
+        symptom = diagnostics.scan(self.NONE_GET)
+        cause = diagnostics.scan(self.MASTERS)
+        self.assertTrue(diagnostics.better(cause, symptom))
+
+    def test_the_first_finding_is_kept_when_both_are_root_causes(self):
+        first = diagnostics.scan(self.MASTERS)
+        other = diagnostics.scan("java.lang.OutOfMemoryError: Java heap space")
+        self.assertFalse(diagnostics.better(other, first))
+
+    def test_ordinary_output_matches_nothing(self):
+        for line in ("26/09/01 09:09:11 Setting default log level to WARN",
+                     "WARN Utils: Service 'SparkUI' could not bind on port 4040",
+                     "working on Read Oracle",
+                     "INFO Importing etl_table_manual"):
+            self.assertIsNone(diagnostics.scan(line), line)
+
+    def test_the_other_known_failures_are_recognised(self):
+        cases = {
+            "DPI-1047: Cannot locate a 64-bit Oracle Client library":
+                "oracle_client_missing",
+            "ORA-01017: invalid username/password; logon denied":
+                "oracle_bad_credentials",
+            "java.lang.ClassNotFoundException: oracle.jdbc.driver.OracleDriver":
+                "jdbc_driver_missing",
+            "java.sql.SQLException: No suitable driver": "jdbc_driver_missing",
+            "java.lang.OutOfMemoryError: Java heap space": "out_of_memory",
+            "WARN TaskSchedulerImpl: Initial job has not accepted any resources":
+                "spark_no_resources",
+            "java.net.BindException: Cannot assign requested address":
+                "spark_bind_address",
+            "Cannot call methods on a stopped SparkContext":
+                "spark_context_stopped",
+        }
+        for line, code in cases.items():
+            finding = diagnostics.scan(line)
+            self.assertIsNotNone(finding, line)
+            self.assertEqual(finding.code, code, line)
+
+    def test_every_pattern_offers_an_actionable_hint(self):
+        for _, cause in diagnostics.PATTERNS:
+            self.assertTrue(cause.summary.strip(), cause.code)
+            self.assertGreater(len(cause.hint), 40,
+                               f"{cause.code} needs a usable next step")
+
+
+class RootCauseOnARunTests(RunnerTestCase):
+    def test_a_spark_failure_reports_the_cause_not_the_write_error(self):
+        run = self.runner.submit(
+            fixture_job("spark_job", ["Build Spark", "Write CSV"]),
+            {"etl_name": "spark_job"}, "tester")
+        self.wait_for(run)
+
+        self.assertEqual(run.status, FAILED)
+        self.assertIsNotNone(run.root_cause)
+        self.assertEqual(run.root_cause.code, "spark_master_unreachable")
+
+        # The raw exception is still there, unchanged.
+        self.assertIn("o307.csv", run.error["message"])
+
+        # The history column shows the cause, not the symptom.
+        row = self.runner.history()[0]
+        self.assertEqual(row["error"], run.root_cause.summary)
+        self.assertNotIn("o307.csv", row["error"])
+
+        # The API exposes both.
+        snapshot = run.snapshot()
+        self.assertEqual(snapshot["root_cause"]["code"], "spark_master_unreachable")
+        self.assertIn("o307.csv", snapshot["raw_error"])
+
+    def test_the_conclusion_is_written_into_the_run_log(self):
+        run = self.runner.submit(
+            fixture_job("spark_job", ["Build Spark", "Write CSV"]),
+            {"etl_name": "spark_job"}, "tester")
+        self.wait_for(run)
+        log = Path(run.log_path).read_text()
+        self.assertIn("All masters are unresponsive", log)
+
+    def test_a_failure_with_no_known_pattern_reports_no_cause(self):
+        run = self.runner.submit(
+            fixture_job("broken_job", ["Alpha", "Beta"]),
+            {"etl_name": "broken_job", "source": "s"}, "tester")
+        self.wait_for(run)
+        self.assertEqual(run.status, FAILED)
+        self.assertIsNone(run.root_cause, "nothing may be invented")
+        self.assertEqual(self.runner.history()[0]["error"],
+                         run.error["message"])
+
+    def test_a_successful_run_has_no_cause(self):
+        run = self.runner.submit(
+            fixture_job("fast_job", self.steps),
+            {"etl_name": "fast_job", "source": "s", "target": "t"}, "tester")
+        self.wait_for(run)
+        self.assertEqual(run.status, COMPLETED)
+        self.assertIsNone(run.root_cause)
+        self.assertIsNone(run.snapshot()["root_cause"])
 
 
 # ---------------------------------------------------------------------------

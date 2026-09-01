@@ -38,6 +38,8 @@ etl/                        NEW  — ETL console
 │   runner.py                 process control: start, watch, stop, one-at-a-time
 │   worker.py                 the subprocess that calls the real run_etl()
 │   etl_config.py             read-only view of the ETL's config.yaml
+│   diagnostics.py            names the likely cause of a failed run
+│   runtime_env.py            rebuilds the ETL's Linux environment
 │   security.py               credential redaction
 │   views.py / urls.py        page + JSON API
 │   management/commands/etl_check.py
@@ -217,6 +219,47 @@ Two details that matter, both covered by `ProgressParsingTests`:
   changes how often the existing progress bar repaints — nothing else.
 
 ---
+
+### Reporting the cause, not the last symptom
+
+A Spark failure reports itself twice, a minute apart, in the wrong order of
+usefulness. The real event is a line like
+
+```
+ERROR StandaloneSchedulerBackend: Application has been killed.
+      Reason: All masters are unresponsive! Giving up.
+```
+
+which stops the SparkContext. Nothing appears to go wrong at that moment. The
+next operation needing a live context — usually the write — then fails with
+
+```
+An error occurred while calling o307.csv.
+: java.util.NoSuchElementException: None.get
+  at ...datasources.BasicWriteJobStatsTracker$.metrics
+```
+
+That method body is `SparkContext.getActive.get`, so `None.get` means "no
+active SparkContext", not "something is wrong with the CSV write". Reporting
+only the exception the ETL raised — which is all the ETL process itself knows
+— sends whoever reads it to the wrong end of the pipeline.
+
+`etl/diagnostics.py` therefore scans the captured output for a small set of
+failures whose meaning is unambiguous and offers the first one as the **likely
+cause**, above the raw exception, with the log line it matched. The execution
+history's Message column shows the cause too.
+
+Two rules keep it honest: every pattern is a verbatim message emitted by
+Spark, the JDBC layer or the Oracle client — nothing is inferred from the
+shape of a stack trace — and it is always presented as the *likely* cause
+alongside the real error, never instead of it. A failure that matches nothing
+reports the raw exception exactly as before.
+
+Recognised today: Spark master registration failure, driver bind-address
+failure, no executor resources, a stopped SparkContext, a write with no active
+context, missing Oracle Instant Client (`DPI-1047`), rejected Oracle
+credentials (`ORA-01017`), a missing JDBC driver, and `OutOfMemoryError`. Each
+carries a next step pointing at the thing in this project that fixes it.
 
 ## 6. Stop behaviour
 
@@ -522,8 +565,8 @@ reports directly.
 | Run fails instantly with "missing a dependency" | `ETL_PYTHON` is the Django venv, not the ETL runtime | point `ETL_PYTHON` at the existing ETL interpreter |
 | `DPI-1047` / Oracle client errors | Instant Client missing at the hard-coded path | install it at `/usr/lib/oracle/12.2/client64/lib` |
 | "Encrypted, but pass1.pkl does not decrypt it" | that profile's password was encrypted with a different key | re-encrypt it: `python src/utils/encrypt_module.py '<password>'` |
-| **`All masters are unresponsive! Giving up.`** after ~1 minute | the Spark driver started but never registered with the master | three causes, in order: (1) `ETL_ENV_SCRIPT` not set, so no `SPARK_HOME`/`SPARK_LOCAL_IP` — see §10.3; (2) the master is not reachable from this host — `etl_check` probes the port; (3) the PySpark version does not match the master's Spark version — the run log's `PySpark x.y.z from …` line against the master UI's version |
-| `Py4JJavaError … NoSuchElementException: None.get` in `BasicWriteJobStatsTracker` | not a separate fault — this is what a write looks like when the SparkContext above never got a working scheduler backend | fix the registration failure in the row above; this line disappears with it |
+| **`All masters are unresponsive! Giving up.`** after ~1 minute | the Spark driver started but never registered with the master — the UI names this as the likely cause automatically | three causes, in order: (1) `ETL_ENV_SCRIPT` not set, so no `SPARK_HOME`/`SPARK_LOCAL_IP` — see §10.3; (2) the master is not reachable from this host — `etl_check` probes the port; (3) the PySpark version does not match the master's Spark version — the run log's `PySpark x.y.z from …` line against the master UI's version |
+| `Py4JJavaError … NoSuchElementException: None.get` in `BasicWriteJobStatsTracker` | not a separate fault — `BasicWriteJobStatsTracker.metrics` is `SparkContext.getActive.get`, so this is a write running with no active context | fix whatever stopped the session (the row above, usually); the UI reports that as the likely cause and shows this only as the reported error |
 | `ClassNotFoundException: org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions` | `spark-defaults.conf` sets `spark.sql.extensions`, but `build_spark` replaces `spark.jars` with the list from `config.yaml`, which has no Iceberg jar | a warning, not fatal. Add the Iceberg jar to `spark_properties.jars`, or drop the extension from `spark-defaults.conf` |
 | `Service 'SparkUI' could not bind on port 4040/4041` | other Spark drivers are already running on the host | a warning; Spark takes the next free port |
 | Run fails at "Build Spark" | Spark master unreachable, or the jars are missing or unreadable | check `spark_properties` in the Configuration panel and run `etl_check` |
@@ -687,12 +730,12 @@ the Fernet key.
 MONITORING_CONFIG=config.demo.ini ./venv/bin/python manage.py test etl
 ```
 
-86 tests covering discovery against the real ETL source, the registry and the
+101 tests covering discovery against the real ETL source, the registry and the
 kwargs it builds, validation, credential redaction, step-bar parsing, and — via
 a fixture ETL project shaped like the real one — the full run lifecycle,
 failure handling, the one-at-a-time rule (including a four-way race), stop, the
-environment handed to the ETL process, the HTTP API, and a regression guard on
-the Monitoring pages.
+environment handed to the ETL process, root-cause reporting, the HTTP API, and
+a regression guard on the Monitoring pages.
 
 The runner tests use a fixture rather than the real ETL because the real one
 needs PySpark, a Spark master, the Oracle Instant Client and live databases.

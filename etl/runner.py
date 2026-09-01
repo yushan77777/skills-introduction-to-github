@@ -43,7 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-from . import runtime_env
+from . import diagnostics, runtime_env
 from .security import Redactor, strip_sensitive
 from .settings import SETTINGS, EtlSettings
 from .worker import ERROR_PREFIX, RESULT_PREFIX
@@ -51,6 +51,16 @@ from .worker import ERROR_PREFIX, RESULT_PREFIX
 #: tqdm writes e.g.
 #: ``oracle_to_csv:  40%|████  | 2/5 [00:03<00:04, 1.5step/s, Read Oracle]``
 _TQDM_COUNT = re.compile(r"\|\s*(\d+)\s*/\s*(\d+)\s*\[")
+#: The whole bar — description, percentage, bar, count and bracket — so that
+#: anything the ETL printed after it can be separated out and kept. tqdm
+#: redraws with \r and no trailing newline, so an ordinary print lands on the
+#: same physical line as the bar; treating that line as "just progress" would
+#: throw the message away.
+#:
+#: Anchored, because each captured segment begins where tqdm's \r put it: the
+#: bar is always at the start, and only trailing text can follow it.
+_TQDM_BAR = re.compile(
+    r"^(?:.*?\d+%\s*\|[^|]*\|)?\s*\d+\s*/\s*\d+\s*\[[^\]]*\]")
 _TQDM_TAIL = re.compile(r",\s*([^,\]]+)\]\s*$")
 #: The trailing segment is tqdm's rate, not a step name, when it looks like
 #: ``?step/s``, ``2.00step/s`` or ``1.5s/step``.
@@ -189,6 +199,9 @@ class Run:
     step_name: str = ""
     result: dict | None = None
     error: dict | None = None
+    #: The likely cause, recognised in the ETL's own output. Never replaces
+    #: `error` — it explains it.
+    root_cause: diagnostics.Finding | None = None
     exit_code: int | None = None
     pid: int | None = None
     logs: deque = field(default_factory=lambda: deque(maxlen=4000))
@@ -230,7 +243,11 @@ class Run:
             "finished_at": self.finished_at,
             "duration_seconds": self.duration_seconds(),
             "triggered_by": self.triggered_by,
-            "error": (self.error or {}).get("message", ""),
+            # The history column shows the cause when one was recognised: the
+            # raw exception is usually the last symptom, not the fault.
+            "error": (self.root_cause.summary if self.root_cause
+                      else (self.error or {}).get("message", "")),
+            "root_cause": self.root_cause.as_dict() if self.root_cause else None,
             "log_path": self.log_path,
             "step_index": self.step_index,
             "step_name": self.step_name,
@@ -249,6 +266,7 @@ class Run:
             "params": self.params,
             "result": self.result,
             "error_detail": self.error,
+            "raw_error": (self.error or {}).get("message", ""),
             "exit_code": self.exit_code,
             "pid": self.pid,
             "logs": lines,
@@ -522,14 +540,29 @@ class ETLRunner:
                 "type": payload.get("type", "Error"),
                 "message": payload.get("error") or payload.get("message", ""),
             }
+            finding = diagnostics.scan(run.error["message"])
+            if finding and diagnostics.better(finding, run.root_cause):
+                run.root_cause = finding
             run.append(f"{run.error['type']}: {run.error['message']}", stream="err")
             return
 
-        progress = _TQDM_COUNT.search(line)
-        if progress:
-            # The redrawn bar is noise in the log pane; it drives the step strip.
-            self._apply_progress(run, int(progress.group(1)), line)
-            return
+        bar = _TQDM_BAR.match(line)
+        if bar:
+            # The redrawn bar is noise in the log pane; it drives the step
+            # strip. Anything printed around it is a real message and is
+            # handled below as if the bar had not been there.
+            count = _TQDM_COUNT.search(bar.group(0))
+            if count:
+                self._apply_progress(run, int(count.group(1)), bar.group(0))
+            residual = f"{line[:bar.start()]} {line[bar.end():]}".strip()
+            # A bar is padded with spaces to erase the previous, longer draw.
+            if not residual:
+                return
+            line = residual
+
+        finding = diagnostics.scan(line)
+        if finding and diagnostics.better(finding, run.root_cause):
+            run.root_cause = finding
 
         run.append(line, stream="err" if _ERROR_WORDS.search(line) else "out")
 
@@ -575,6 +608,10 @@ class ETLRunner:
             run.append("ETL completed successfully.")
         else:
             status = FAILED
+            if run.root_cause is not None:
+                run.append(f"Likely cause: {run.root_cause.summary}", stream="err")
+                run.append(f"Suggested next step: {run.root_cause.hint}",
+                           stream="err")
             if run.error is None:
                 if code is not None and code < 0:
                     name = signal.Signals(-code).name if -code in \
