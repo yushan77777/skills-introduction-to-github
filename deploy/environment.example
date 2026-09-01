@@ -1,0 +1,63 @@
+# Environment for the unified ETL & Monitoring platform.
+# Install at /etc/etl-monitoring/environment, chmod 600, owned by root.
+#
+# systemd reads this file literally: no shell expansion, no quotes needed,
+# and no inline comments after a value.
+
+# --------------------------------------------------------------------------
+# Django
+# --------------------------------------------------------------------------
+DJANGO_SETTINGS_MODULE=monitoring_site.settings
+# Generate once and keep it secret:
+#   python -c "from django.core.management.utils import get_random_secret_key as k; print(k())"
+DJANGO_SECRET_KEY=<GENERATE_ME>
+DJANGO_DEBUG=0
+DJANGO_ALLOWED_HOSTS=etl-monitoring.internal,10.0.0.5
+# Only needed when the site is served over HTTPS behind a proxy:
+# DJANGO_CSRF_TRUSTED_ORIGINS=https://etl-monitoring.internal
+
+# --------------------------------------------------------------------------
+# Monitoring app — unchanged from the original deployment
+# --------------------------------------------------------------------------
+MONITORING_CONFIG=/etc/etl-monitoring/config.ini
+
+# --------------------------------------------------------------------------
+# ETL app
+# --------------------------------------------------------------------------
+# The EXISTING ETL project: the directory holding etl_table_manual.py,
+# config/config.yaml and src/utils/.
+ETL_PROJECT_ROOT=/analyticsShare/yushan/04.daily_use/5.all_etl/v1
+
+# The EXISTING Python runtime that already has pyspark, oracledb, psycopg2,
+# pandas, tqdm, pyarrow and cryptography, and that can reach the Oracle
+# Instant Client. This is NOT the venv Django runs in.
+ETL_PYTHON=/analyticsShare/yushan/04.daily_use/5.all_etl/venv/bin/python
+
+# Spark is NOT configured here. Every Spark setting — master URL, jars,
+# executors, memory — comes from spark_properties in the ETL's own
+# config/config.yaml, which stays the single source of truth. Verify it with
+#     manage.py spark_check
+#
+# The two hooks below exist only for a host that needs something set before
+# Python starts (a dynamic-linker path, say). Leave them unset: the supplied
+# ETL needs neither, since oracle_connect.py passes lib_dir to
+# init_oracle_client explicitly.
+# ETL_ENV_SCRIPT=/path/to/etl-env.sh
+# ETL_ENV_FILE=/etc/etl-monitoring/etl-runtime.env
+
+# Where per-run logs are written. Must be writable by the service user.
+# Defaults to <ETL_PROJECT_ROOT>/logs when unset.
+ETL_LOG_DIR=/var/log/etl-monitoring
+
+# Optional overrides — the defaults match the supplied ETL source.
+# ETL_MODULE=etl_table_manual
+# ETL_ENTRYPOINT=run_etl
+# ETL_CONFIG_YAML=config/config.yaml
+# ETL_HISTORY_SIZE=50
+# ETL_LOG_BUFFER=4000
+
+# --------------------------------------------------------------------------
+# Gunicorn
+# --------------------------------------------------------------------------
+GUNICORN_BIND=0.0.0.0:8000
+GUNICORN_THREADS=8

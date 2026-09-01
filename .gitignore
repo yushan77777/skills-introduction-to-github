@@ -35,3 +35,30 @@
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# ---------------------------------------------------------------------------
+# ETL & Monitoring platform
+# ---------------------------------------------------------------------------
+venv/
+.venv/
+__pycache__/
+*.pyc
+db.sqlite3
+demo_data/
+staticfiles/
+
+# Real credentials never go into version control. Both applications ship an
+# example file next to the one they actually read:
+#   config.example.ini              -> config.ini            (Monitoring)
+#   etl_project/config/config.example.yaml
+#                                   -> etl_project/config/config.yaml (ETL)
+config.ini
+etl_project/config/config.yaml
+
+# The Fernet key that decrypts the passwords in config.yaml. It is a
+# credential, not source code — see etl_project/config/pickle/README.md.
+etl_project/config/pickle/*.pkl
+
+# Per-run ETL logs and the single-run lock file.
+etl_project/logs/
+*.lock

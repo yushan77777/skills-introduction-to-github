@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------------------
+# ETL runtime dependencies (the interpreter named by ETL_PYTHON)
+# ---------------------------------------------------------------------------
+# Derived from the imports in the supplied ETL source. On the existing server
+# this environment ALREADY EXISTS and already works — do not rebuild it from
+# this file. It is here to document what the runtime must provide and to help
+# stand up a new host, not to be pip-installed over a working one.
+#
+# Versions are intentionally unpinned: the supplied source names no versions,
+# and pinning them here would be inventing constraints. Pin them against
+# whatever the working server actually has (`pip freeze`) before using this
+# file to build a second host.
+#
+# imported by etl_table_manual.py
+pyspark
+pandas
+numpy
+PyYAML
+tqdm
+pyarrow
+#
+# imported by src/utils/oracle_connect.py
+oracledb
+#
+# imported by src/utils/greenplum_connect.py
+psycopg2-binary
+#
+# imported by src/utils/encrypt_module.py
+cryptography
+
+# ---------------------------------------------------------------------------
+# NOT pip-installable — must be present on the host
+# ---------------------------------------------------------------------------
+# * Oracle Instant Client at /usr/lib/oracle/12.2/client64/lib
+#   oracle_connect.py calls oracledb.init_oracle_client(lib_dir=...) with that
+#   exact path at import time, so the module fails to import without it.
+# * A reachable Spark master (config.yaml -> spark_properties.master_url).
+# * The connector jars listed in spark_properties.jars, readable by the ETL
+#   user: ojdbc6.jar, postgresql-42.2.18.jar and the Greenplum Spark connector.
+# * A writable Spark temp directory at /data/spark-4.0.0-bin-hadoop3/tmp/
+#   (set in build_spark via java.io.tmpdir).

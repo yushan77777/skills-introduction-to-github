@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Disk Usage · System Monitor{% endblock %}
+{% block nav_disk %}active{% endblock %}
+
+{% block content %}
+<div class="du-layout"
+     data-snapshot-table="{{ snapshot_table }}"
+     data-hist-table="{{ hist_table }}">
+
+  <!-- Toolbar: breadcrumb + metadata + treemap button -->
+  <section class="du-toolbar">
+    <nav id="du-breadcrumb" class="du-breadcrumb" aria-label="Directory path"></nav>
+    <div class="du-toolbar-right">
+      <div class="du-meta">
+        <span class="du-badge" title="Snapshot source table">
+          <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+            <ellipse cx="12" cy="6" rx="8" ry="3" fill="none" stroke="currentColor" stroke-width="2"/>
+            <path d="M4 6v12c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="none" stroke="currentColor" stroke-width="2"/>
+          </svg>
+          {{ snapshot_table }}
+        </span>
+        <span class="du-badge" id="du-scan-time" title="Data collection time (scan start → end)">–</span>
+        <span class="du-badge du-badge-strong" id="du-total-size" title="Total size of the listed directories">–</span>
+      </div>
+      <button id="du-treemap-btn" class="du-btn" type="button">
+        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+          <rect x="3" y="3" width="10" height="18" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/>
+          <rect x="15" y="3" width="6" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/>
+          <rect x="15" y="15" width="6" height="6" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/>
+        </svg>
+        Treemap
+      </button>
+    </div>
+  </section>
+
+  <div id="du-error" class="du-error" hidden></div>
+
+  <!-- Directory list -->
+  <section class="du-panel du-list-panel">
+    <div class="du-list-header">
+      <span class="du-col-dir">Directory</span>
+      <span class="du-col-bar">Share of level</span>
+      <span class="du-col-size">Size</span>
+      <span class="du-col-time">Collected</span>
+    </div>
+    <div id="du-rows" class="du-rows" role="listbox" aria-label="Directories">
+      <div class="du-loading">Loading…</div>
+    </div>
+    <div class="du-hint">
+      <strong>Click</strong> a directory for its history ·
+      <strong>Double-click</strong> to drill down
+    </div>
+  </section>
+
+  <!-- History trend (always visible, no page scroll needed) -->
+  <section class="du-panel du-history-panel">
+    <div class="du-panel-title">
+      <span id="du-history-title">Usage history</span>
+      <span class="du-badge" title="History source table (only size changes are recorded)">{{ hist_table }}</span>
+    </div>
+    <div id="du-history-body" class="du-history-body">
+      <div class="du-empty">Click a directory above to see its usage trend</div>
+    </div>
+  </section>
+</div>
+
+<!-- Treemap modal -->
+<div id="du-modal" class="du-modal" hidden>
+  <div class="du-modal-card" role="dialog" aria-modal="true" aria-labelledby="du-modal-title">
+    <div class="du-modal-head">
+      <div>
+        <h2 id="du-modal-title">Treemap</h2>
+        <p id="du-modal-sub" class="du-modal-sub"></p>
+      </div>
+      <button id="du-modal-close" class="du-btn du-btn-ghost" type="button" aria-label="Close treemap">✕</button>
+    </div>
+    <div id="du-treemap" class="du-treemap"></div>
+    <div class="du-hint">Box area = size · darker = larger · <strong>double-click</strong> a box to drill down</div>
+  </div>
+</div>
+
+<div id="du-tooltip" class="du-tooltip" hidden></div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{% static 'js/diskusage.js' %}"></script>
+{% endblock %}

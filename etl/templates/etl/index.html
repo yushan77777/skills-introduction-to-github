@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}ETL · ETL &amp; Monitoring Platform{% endblock %}
+{% block nav_etl %}active{% endblock %}
+
+{% block styles %}<link rel="stylesheet" href="{% static 'etl/etl.css' %}">{% endblock %}
+
+{% block content %}
+<div class="etl-layout"
+     data-api="{% url 'etl:index' %}api/"
+     data-entrypoint="{{ entrypoint }}"
+     data-project-root="{{ project_root }}">
+  {% csrf_token %}
+
+  <!-- Toolbar: job picker, route, source metadata, configuration -->
+  <section class="etl-toolbar">
+    <div class="etl-toolbar-left">
+      <label class="etl-toolbar-label" for="etl-job">ETL job</label>
+      <select id="etl-job" class="etl-select">
+        <option value="">Loading jobs…</option>
+      </select>
+      <span id="etl-route" class="etl-route" hidden>
+        <span data-role="source"></span>
+        <span class="etl-route-arrow" aria-hidden="true">→</span>
+        <span data-role="destination"></span>
+      </span>
+    </div>
+    <div class="etl-toolbar-right">
+      <span class="etl-badge" id="etl-entrypoint-badge"
+            title="Entry point discovered in the ETL source">{{ entrypoint }}</span>
+      <span class="etl-badge" id="etl-jobs-badge"
+            title="Jobs discovered in the ETL source">{{ job_count }} jobs</span>
+      <button id="etl-config-btn" class="etl-btn etl-btn-ghost" type="button">
+        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+          <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/>
+          <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        Configuration
+      </button>
+    </div>
+  </section>
+
+  <div id="etl-banner" class="etl-banner" hidden></div>
+
+  <div class="etl-grid">
+
+    <!-- ---------------- Configure a run ---------------- -->
+    <section class="etl-panel etl-form-panel">
+      <div class="etl-panel-title">
+        <span>Configure a run</span>
+        <span class="etl-badge" id="etl-job-key" hidden></span>
+      </div>
+
+      <div class="etl-panel-body">
+        <p id="etl-description" class="etl-description">
+          Choose an ETL job above. Its parameters are read from the ETL source, so
+          only the ones that job actually accepts are shown.
+        </p>
+
+        <ul id="etl-notes" class="etl-notes" hidden></ul>
+
+        <form id="etl-form" class="etl-form" novalidate autocomplete="off">
+          <div id="etl-fields"></div>
+        </form>
+      </div>
+
+      <div class="etl-panel-foot" id="etl-actions" hidden>
+        <button type="button" class="etl-btn" id="etl-run-btn">
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+            <path d="M7 4l12 8-12 8z" fill="currentColor"/>
+          </svg>
+          Run ETL
+        </button>
+        <button type="button" class="etl-btn etl-btn-ghost" id="etl-validate-btn">
+          Validate
+        </button>
+        <button type="button" class="etl-btn etl-btn-ghost" id="etl-reset-btn">
+          Reset
+        </button>
+        <span class="etl-foot-spacer"></span>
+        <span id="etl-form-message" class="etl-form-message" role="status"
+              aria-live="polite"></span>
+      </div>
+    </section>
+
+    <!-- ---------------- Current execution ---------------- -->
+    <section class="etl-panel etl-run-panel">
+      <div class="etl-panel-title">
+        <span>Current execution</span>
+        <span class="etl-chip etl-chip-idle" id="etl-status-chip">Idle</span>
+      </div>
+
+      <div class="etl-panel-body">
+        <dl class="etl-meta" id="etl-run-meta" hidden>
+          <div><dt>Job</dt><dd id="etl-meta-job">—</dd></div>
+          <div><dt>Started</dt><dd id="etl-meta-started">—</dd></div>
+          <div><dt>Duration</dt><dd id="etl-meta-duration">—</dd></div>
+          <div><dt>Triggered by</dt><dd id="etl-meta-trigger">—</dd></div>
+          <div><dt>Current step</dt><dd id="etl-meta-step">—</dd></div>
+          <div><dt>Process</dt><dd id="etl-meta-pid">—</dd></div>
+        </dl>
+
+        <ol class="etl-steps" id="etl-steps" hidden aria-label="ETL steps"></ol>
+
+        <div class="etl-result" id="etl-result" hidden></div>
+
+        <p class="etl-empty" id="etl-run-empty">
+          Nothing is running. The step list and log below come from the ETL
+          process itself — no progress is simulated here.
+        </p>
+
+        <div class="etl-logs" id="etl-log-wrap" hidden>
+          <div class="etl-logs-bar">
+            <span class="etl-logs-title">Log</span>
+            <label class="etl-logs-follow">
+              <input type="checkbox" id="etl-follow-log" checked> Follow
+            </label>
+            <a class="etl-log-link" id="etl-log-link" href="#" target="_blank"
+               rel="noopener" hidden>Open full log</a>
+          </div>
+          <pre class="etl-logs-body" id="etl-logs" tabindex="0"></pre>
+        </div>
+      </div>
+
+      <div class="etl-panel-foot">
+        <button type="button" class="etl-btn etl-btn-stop" id="etl-stop-btn" disabled>
+          <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+            <rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor"/>
+          </svg>
+          Stop run
+        </button>
+        <span class="etl-foot-hint" id="etl-stop-hint">
+          Stop kills the ETL process group immediately.
+        </span>
+      </div>
+    </section>
+  </div>
+
+  <!-- ---------------- Execution history ---------------- -->
+  <section class="etl-panel etl-history-panel">
+    <div class="etl-panel-title">
+      <span>Execution history</span>
+      <span class="etl-badge" id="etl-log-dir" title="Where run logs are written">—</span>
+    </div>
+    <div class="etl-table-scroll">
+      <table class="etl-table">
+        <thead>
+          <tr>
+            <th>Job</th>
+            <th>Start</th>
+            <th>End</th>
+            <th class="etl-col-num">Duration</th>
+            <th>Status</th>
+            <th>Triggered by</th>
+            <th>Message</th>
+            <th>Log</th>
+          </tr>
+        </thead>
+        <tbody id="etl-history-rows">
+          <tr><td colspan="8" class="etl-table-empty">No runs recorded in this
+            application session yet.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="etl-hint">
+      History is held for this application session and mirrored to the log files
+      on disk. Restarting the web application clears the table, not the logs.
+    </div>
+  </section>
+</div>
+
+<!-- ---------------- Configuration summary (read-only) ---------------- -->
+<div id="etl-config-modal" class="etl-modal" hidden>
+  <div class="etl-modal-card" role="dialog" aria-modal="true"
+       aria-labelledby="etl-config-title">
+    <div class="etl-modal-head">
+      <div>
+        <h2 id="etl-config-title">ETL configuration</h2>
+        <p class="etl-modal-sub" id="etl-config-source"></p>
+      </div>
+      <button id="etl-config-close" class="etl-btn etl-btn-ghost" type="button"
+              aria-label="Close configuration">✕</button>
+    </div>
+    <div class="etl-modal-body" id="etl-config-body">
+      <p class="etl-empty">Loading…</p>
+    </div>
+    <div class="etl-hint">
+      Read-only. Configuration is backend-controlled: change it in the file on
+      the server, not from this page.
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{% static 'etl/etl.js' %}"></script>
+{% endblock %}

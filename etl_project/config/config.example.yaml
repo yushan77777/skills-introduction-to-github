@@ -1,0 +1,74 @@
+# =============================================================================
+# ETL configuration — TEMPLATE
+# =============================================================================
+# Copy this file to config/config.yaml on the server and fill in the real
+# values. config.yaml itself is deliberately NOT in version control: it holds
+# database hosts, users and passwords.
+#
+#   cp config/config.example.yaml config/config.yaml
+#   chmod 600 config/config.yaml
+#
+# Structure, key names and semantics below are exactly those the supplied ETL
+# source reads — do not rename anything. Only the values are placeholders.
+#
+# Where each block is used:
+#   <oracle profile>   run_etl(oracle_config_name=...) -> read_oracle_df()
+#   <greenplum profile> run_etl(gp_config_key=...)     -> src.utils.greenplum_connect
+#   spark_properties   build_spark()
+#
+# Passwords:
+#   * Oracle profiles store an ENCRYPTED password plus the path to the Fernet
+#     key that decrypts it (`pickle`). Generate a ciphertext with:
+#         python src/utils/encrypt_module.py '<the plaintext password>'
+#     (edit the key path at the bottom of that file first, or pass the same
+#     path the profile uses).
+#   * The `url` of an Oracle profile also embeds user/password in clear. The
+#     web UI masks it, but the file itself does not — keep it chmod 600.
+# =============================================================================
+
+# --- Greenplum profiles ------------------------------------------------------
+# Consumed by src/utils/greenplum_connect.greenplum, which requires exactly
+# these keys: username, password, driver, schema, url.
+greenplum:
+  username: "gpadmin"
+  password: ""
+  driver: "org.postgresql.Driver"
+  schema: "public"
+  host: 'greenplum-host.internal'
+  port: "5432"
+  url: "jdbc:postgresql://greenplum-host.internal:5432/your_database"
+
+greenplum2:
+  username: "gpadmin"
+  password: ""
+  driver: "org.postgresql.Driver"
+  schema: "public"
+  host: 'greenplum-standby.internal'
+  port: "5432"
+  url: "jdbc:postgresql://greenplum-standby.internal:5432/your_database"
+
+# --- Oracle profiles ---------------------------------------------------------
+# Consumed by read_oracle_df(), which requires: user, password, driver, url,
+# pickle. Add one block per source database; the block name is what the ETL UI
+# offers in its "Oracle config key" dropdown.
+oracle_example:
+  user: "SCHEMA_USER"
+  pickle: 'config/pickle/pass1.pkl'
+  password: "gAAAAAB...replace-with-the-encrypted-password..."
+  driver: "oracle.jdbc.driver.OracleDriver"
+  url: 'jdbc:oracle:thin:SCHEMA_USER/password@//oracle-host.internal:1521/service_name'
+
+# --- Spark cluster -----------------------------------------------------------
+# Consumed by build_spark(). Every key below is read by name; a missing one
+# raises KeyError when a Spark-based job starts.
+spark_properties:
+  session_name: "etl_session"
+  master_url: 'spark://spark-master.internal:7077'
+  # Comma-separated, readable by the ETL user. The Oracle, PostgreSQL and
+  # Greenplum connector jars are all required.
+  jars: '/data/resources/jars/ojdbc6.jar,/data/resources/jars/postgresql-42.2.18.jar,/data/resources/jars/greenplum-connector-apache-spark-scala_2.12-2.2.0.jar'
+  executor_instances: "10"
+  executor_memory: "10g"
+  executor_cores: "5"
+  cores_max: "30"
+  driver_memory: "8g"

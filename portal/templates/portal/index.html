@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}ETL &amp; Monitoring Platform{% endblock %}
+
+{% block styles %}<link rel="stylesheet" href="{% static 'css/portal.css' %}">{% endblock %}
+
+{% block content %}
+<div class="portal">
+  <div class="portal-hero">
+    <h1>ETL &amp; Monitoring Platform</h1>
+    <p class="portal-sub">Two applications, one server. Pick where you are going.</p>
+  </div>
+
+  <div class="portal-doors">
+    {% for section in sections %}
+    <a class="portal-door" href="{% url section.url_name %}">
+      <span class="portal-door-icon">
+        {% if section.icon == "monitor" %}
+        <svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true">
+          <rect x="2" y="4" width="20" height="13" rx="2" fill="none"
+                stroke="currentColor" stroke-width="2"/>
+          <path d="M8 21h8M12 17v4" fill="none" stroke="currentColor"
+                stroke-width="2" stroke-linecap="round"/>
+          <path d="M6 12.5h2.5l1.5-3.5 2.5 6 1.5-2.5H18" fill="none"
+                stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                stroke-linejoin="round"/>
+        </svg>
+        {% else %}
+        <svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true">
+          <ellipse cx="6" cy="5" rx="4" ry="2" fill="none" stroke="currentColor"
+                   stroke-width="2"/>
+          <path d="M2 5v6c0 1.1 1.79 2 4 2s4-.9 4-2V5" fill="none"
+                stroke="currentColor" stroke-width="2"/>
+          <ellipse cx="18" cy="13" rx="4" ry="2" fill="none" stroke="currentColor"
+                   stroke-width="2"/>
+          <path d="M14 13v6c0 1.1 1.79 2 4 2s4-.9 4-2v-6" fill="none"
+                stroke="currentColor" stroke-width="2"/>
+          <path d="M8.5 10.5c2 1.5 3.5 2.5 5 4.5" fill="none" stroke="currentColor"
+                stroke-width="2" stroke-linecap="round" stroke-dasharray="2.5 2.5"/>
+        </svg>
+        {% endif %}
+      </span>
+      <span class="portal-door-tag">{{ section.tagline }}</span>
+      <h2>{{ section.name }}</h2>
+      <p>{{ section.description }}</p>
+      <span class="portal-door-cta">Open {{ section.name }} &rarr;</span>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}
