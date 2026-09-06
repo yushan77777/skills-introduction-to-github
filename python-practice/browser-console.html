@@ -1,0 +1,1154 @@
+<title>Python Practice Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,500;1,400&display=swap">
+<style>
+:root{
+  --paper:#EEF1F5;
+  --surface:#FFFFFF;
+  --surface-2:#F5F8FC;
+  --code-bg:#F7F9FC;
+  --line:#D4DBE5;
+  --line-soft:#E4E9F0;
+  --ink:#141B24;
+  --ink-2:#546172;
+  --ink-3:#7A8798;
+  --accent:#2F5D8E;
+  --accent-ink:#FFFFFF;
+  --accent-soft:#DDE8F4;
+  --ochre:#9A6C15;
+  --ochre-soft:#F2E7CE;
+  --ok:#276F4F;
+  --ok-soft:#D8EDE3;
+  --bad:#A93B34;
+  --bad-soft:#F6DEDB;
+  --shadow:0 1px 2px rgba(20,27,36,.06), 0 8px 24px -16px rgba(20,27,36,.35);
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;
+  --serif:"IBM Plex Serif",Georgia,"Times New Roman",serif;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#0E1319;
+    --surface:#161D25;
+    --surface-2:#1C242E;
+    --code-bg:#121921;
+    --line:#2A3542;
+    --line-soft:#222C37;
+    --ink:#E2E9F1;
+    --ink-2:#98A6B7;
+    --ink-3:#768394;
+    --accent:#7FB3E2;
+    --accent-ink:#0E1319;
+    --accent-soft:#1C2E42;
+    --ochre:#D9A952;
+    --ochre-soft:#2E2718;
+    --ok:#5FC091;
+    --ok-soft:#162A22;
+    --bad:#E58279;
+    --bad-soft:#2E1B1A;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0E1319;
+  --surface:#161D25;
+  --surface-2:#1C242E;
+  --code-bg:#121921;
+  --line:#2A3542;
+  --line-soft:#222C37;
+  --ink:#E2E9F1;
+  --ink-2:#98A6B7;
+  --ink-3:#768394;
+  --accent:#7FB3E2;
+  --accent-ink:#0E1319;
+  --accent-soft:#1C2E42;
+  --ochre:#D9A952;
+  --ochre-soft:#2E2718;
+  --ok:#5FC091;
+  --ok-soft:#162A22;
+  --bad:#E58279;
+  --bad-soft:#2E1B1A;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0;
+  background:var(--paper);
+  color:var(--ink);
+  font-family:var(--sans);
+  font-size:14px;
+  line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+}
+button{font-family:inherit;font-size:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:3px}
+
+/* ---------- shell ---------- */
+.shell{display:grid;grid-template-columns:268px minmax(0,1fr);height:100svh;overflow:hidden}
+.pane{min-height:0;min-width:0}
+
+/* ---------- rail ---------- */
+.rail{background:var(--surface);border-right:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden}
+.rail-head{padding:18px 20px 14px;border-bottom:1px solid var(--line-soft);display:flex;flex-direction:column;gap:12px}
+.wordmark{display:flex;align-items:baseline;gap:8px}
+.wordmark strong{font-size:16px;font-weight:600;letter-spacing:-.01em}
+.wordmark span{font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+.progress{display:flex;flex-direction:column;gap:7px}
+.progress-line{display:flex;justify-content:space-between;align-items:baseline;font-family:var(--mono);font-size:11px;color:var(--ink-2);letter-spacing:.02em}
+.progress-line b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+.ticks{display:grid;grid-template-columns:repeat(15,1fr);gap:2px}
+.tick{height:5px;border-radius:1px;background:var(--line);transition:background .25s ease}
+.tick.on{background:var(--ok)}
+.rail-list{overflow-y:auto;padding:6px 12px 24px;flex:1}
+.level-head{padding:15px 8px 6px;margin-top:9px;border-top:1px solid var(--line-soft);color:var(--ink-3);font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.level-head:first-child{margin-top:0;border-top:0}
+.level-head i{font-style:normal;color:var(--accent);font-weight:600}
+.task-btn{width:100%;display:flex;align-items:center;gap:10px;padding:7px 9px;border:0;border-radius:6px;background:none;cursor:pointer;text-align:left;color:var(--ink-2);transition:background .15s ease,color .15s ease}
+.task-btn:hover{background:var(--surface-2);color:var(--ink)}
+.task-btn.active{background:var(--accent-soft);color:var(--ink)}
+.task-btn.active .task-name{font-weight:600}
+.task-num{font-family:var(--mono);font-size:11px;color:var(--ink-3);width:16px;text-align:right;font-variant-numeric:tabular-nums}
+.task-btn.active .task-num{color:var(--accent)}
+.task-name{flex:1;font-family:var(--mono);font-size:12.5px;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--line);flex:none}
+.dot.started{background:var(--ochre)}
+.dot.done{background:var(--ok)}
+
+/* ---------- main ---------- */
+.main{display:grid;grid-template-rows:auto minmax(0,1fr);overflow:hidden}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 22px;border-bottom:1px solid var(--line);background:var(--surface)}
+.topbar h1{margin:0;font-size:17px;font-weight:600;letter-spacing:-.015em}
+.topbar h1 code{font-family:var(--mono);font-size:15px;font-weight:500;color:var(--accent)}
+.topbar-meta{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+.runtime{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border:1px solid var(--line);border-radius:999px;white-space:nowrap}
+.runtime .dot{width:6px;height:6px}
+.runtime.ready .dot{background:var(--ok)}
+.runtime.failed .dot{background:var(--bad)}
+.runtime.loading .dot{background:var(--ochre)}
+
+.body{display:grid;grid-template-columns:minmax(320px,400px) minmax(0,1fr);overflow:hidden}
+
+/* ---------- brief ---------- */
+.brief{border-right:1px solid var(--line);background:var(--surface);overflow-y:auto;padding:22px 24px 40px}
+.eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);margin:0 0 10px}
+.brief h2{margin:0 0 4px;font-family:var(--mono);font-size:16px;font-weight:600;letter-spacing:-.02em;color:var(--accent)}
+.brief-lede{font-family:var(--serif);font-size:15.5px;line-height:1.6;color:var(--ink);margin:14px 0 0;max-width:60ch}
+.brief-lede + .brief-lede{margin-top:10px}
+.brief-lede code,.hint code{font-family:var(--mono);font-size:.88em;background:var(--surface-2);border:1px solid var(--line-soft);border-radius:3px;padding:.06em .3em}
+.examples{margin:18px 0 0;border:1px solid var(--line-soft);border-radius:7px;background:var(--code-bg);overflow:hidden}
+.examples-head{padding:7px 12px;border-bottom:1px solid var(--line-soft);font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+.examples pre{margin:0;padding:11px 12px;font-family:var(--mono);font-size:12.5px;line-height:1.75;overflow-x:auto;color:var(--ink)}
+.examples .arrow{color:var(--accent)}
+.hint{margin:16px 0 0;font-family:var(--serif);font-size:14.5px;line-height:1.6;color:var(--ink-2);max-width:60ch}
+details{margin-top:16px;border-top:1px solid var(--line-soft);padding-top:12px}
+summary{cursor:pointer;font-family:var(--mono);font-size:11.5px;letter-spacing:.04em;color:var(--ink-2);list-style:none;display:flex;align-items:center;gap:7px}
+summary::-webkit-details-marker{display:none}
+summary::before{content:"+";color:var(--accent);font-weight:600}
+details[open] summary::before{content:"–"}
+summary:hover{color:var(--ink)}
+details pre{margin:12px 0 0;padding:12px;background:var(--code-bg);border:1px solid var(--line-soft);border-radius:7px;font-family:var(--mono);font-size:12.5px;line-height:1.65;overflow-x:auto}
+
+/* ---------- workbench ---------- */
+.work{display:grid;grid-template-rows:minmax(0,1.35fr) minmax(0,1fr);overflow:hidden;background:var(--paper)}
+.editor-wrap{display:flex;flex-direction:column;overflow:hidden;padding:16px 18px 0}
+.editor-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:0 2px 9px}
+.editor-label{font-family:var(--mono);font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3)}
+.controls{display:flex;align-items:center;gap:8px}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:6px 13px;border-radius:6px;border:1px solid var(--line);background:var(--surface);color:var(--ink-2);cursor:pointer;font-size:12.5px;transition:border-color .15s ease,color .15s ease,background .15s ease}
+.btn:hover{border-color:var(--ink-3);color:var(--ink)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
+.btn.primary:hover{filter:brightness(1.08)}
+.btn.primary:disabled{opacity:.5;cursor:not-allowed;filter:none}
+.btn kbd{font-family:var(--mono);font-size:10.5px;opacity:.75;border:0;background:none;padding:0}
+.editor{flex:1;display:flex;min-height:0;border:1px solid var(--line);border-radius:8px;background:var(--code-bg);overflow:hidden;box-shadow:var(--shadow)}
+.gutter{flex:none;padding:12px 0 12px 12px;font-family:var(--mono);font-size:13px;line-height:1.65;color:var(--ink-3);text-align:right;user-select:none;overflow:hidden;font-variant-numeric:tabular-nums;opacity:.6}
+.gutter div{height:calc(13px * 1.65)}
+#code{flex:1;min-width:0;padding:12px;border:0;outline:none;resize:none;background:none;color:var(--ink);font-family:var(--mono);font-size:13px;line-height:1.65;white-space:pre;overflow:auto;tab-size:4}
+
+/* ---------- console ---------- */
+.console{display:flex;flex-direction:column;overflow:hidden;padding:14px 18px 18px;gap:9px}
+.console-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.console-head .editor-label{padding:0}
+.verdict{font-family:var(--mono);font-size:11.5px;padding:2px 9px;border-radius:999px;border:1px solid var(--line);color:var(--ink-2)}
+.verdict.pass{background:var(--ok-soft);border-color:transparent;color:var(--ok);font-weight:600}
+.verdict.fail{background:var(--bad-soft);border-color:transparent;color:var(--bad);font-weight:600}
+.console-body{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:12px}
+.stream,.checks{border:1px solid var(--line);border-radius:8px;background:var(--surface);overflow:auto;padding:11px 13px}
+.stream{font-family:var(--mono);font-size:12.5px;line-height:1.65;white-space:pre-wrap;word-break:break-word;color:var(--ink)}
+.stream .trace{color:var(--bad)}
+.placeholder{color:var(--ink-3);font-family:var(--sans);font-size:13px;line-height:1.55}
+.check{display:grid;grid-template-columns:14px minmax(0,1fr);gap:9px;padding:6px 0;border-bottom:1px solid var(--line-soft)}
+.check:last-child{border-bottom:0}
+.check .mark{font-family:var(--mono);font-size:12px;font-weight:600;line-height:1.5}
+.check.ok .mark{color:var(--ok)}
+.check.no .mark{color:var(--bad)}
+.check-label{font-family:var(--mono);font-size:12px;color:var(--ink);word-break:break-word}
+.check.ok .check-label{color:var(--ink-2)}
+.check-detail{margin-top:3px;font-family:var(--mono);font-size:11.5px;color:var(--ink-2);display:flex;flex-wrap:wrap;gap:4px 12px}
+.check-detail b{font-weight:500;color:var(--ink-3);letter-spacing:.03em}
+.check-detail .got{color:var(--bad)}
+.check-detail .want{color:var(--ok)}
+
+.banner{margin:0;padding:10px 22px;background:var(--ochre-soft);color:var(--ochre);font-size:12.5px;border-bottom:1px solid var(--line)}
+.banner code{font-family:var(--mono)}
+
+@media (max-width:1180px){
+  .shell{grid-template-columns:1fr;height:auto;overflow:visible}
+  .rail{border-right:0;border-bottom:1px solid var(--line);overflow:visible}
+  .rail-list{display:flex;overflow-x:auto;padding:10px 12px;gap:4px;align-items:center}
+  .level-head{padding:0 6px 0 10px;margin-top:0;border-top:0;flex:none}
+  .level-head hr{display:none}
+  .task-btn{width:auto;flex:none;padding:6px 10px}
+  .task-name{max-width:150px}
+  .main{overflow:visible}
+  .body{grid-template-columns:1fr;overflow:visible}
+  .brief{border-right:0;border-bottom:1px solid var(--line);overflow:visible;max-height:none}
+  .work{overflow:visible}
+  .editor{height:340px;flex:none}
+  .console-body{min-height:260px}
+}
+@media (max-width:720px){
+  .console-body{grid-template-columns:1fr;min-height:0}
+  .stream,.checks{max-height:230px}
+  .topbar{flex-wrap:wrap}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+
+<div class="shell">
+  <aside class="rail pane">
+    <div class="rail-head">
+      <div class="wordmark"><strong>Python Practice</strong><span>15 tasks</span></div>
+      <div class="progress">
+        <div class="progress-line"><span>Passing</span><b id="score">0 / 15</b></div>
+        <div class="ticks" id="ticks"></div>
+      </div>
+    </div>
+    <nav class="rail-list" id="rail"></nav>
+  </aside>
+
+  <div class="main pane">
+    <div class="topbar">
+      <h1 id="task-title">Loading…</h1>
+      <div class="topbar-meta">
+        <span class="runtime loading" id="runtime"><span class="dot"></span><span id="runtime-text">starting Python…</span></span>
+      </div>
+    </div>
+    <div class="body">
+      <section class="brief pane" id="brief"></section>
+      <section class="work pane">
+        <div class="editor-wrap">
+          <div class="editor-bar">
+            <span class="editor-label">your code</span>
+            <div class="controls">
+              <button class="btn" id="reset-btn" type="button">Reset</button>
+              <button class="btn primary" id="run-btn" type="button" disabled>Run &amp; check <kbd>⌘⏎</kbd></button>
+            </div>
+          </div>
+          <div class="editor">
+            <div class="gutter" id="gutter"></div>
+            <textarea id="code" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off" aria-label="Python code editor"></textarea>
+          </div>
+        </div>
+        <div class="console">
+          <div class="console-head">
+            <span class="editor-label">output &amp; checks</span>
+            <span class="verdict" id="verdict">not run yet</span>
+          </div>
+          <div class="console-body">
+            <div class="stream" id="stream"><span class="placeholder">Anything you <code>print()</code> shows up here.</span></div>
+            <div class="checks" id="checks"><span class="placeholder">Press <b>Run &amp; check</b> to test your answer against the task.</span></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script type="text/x-python" data-task="t1">
+def greet(name):
+    # Your code goes here. Delete `pass` once you write a return.
+    pass
+#== tests ==
+check("greet('Ada')", greet("Ada"), "Hello, Ada!")
+check("greet('Grace')", greet("Grace"), "Hello, Grace!")
+check("greet('') still has the punctuation", greet(""), "Hello, !")
+#== solution ==
+def greet(name):
+    return f"Hello, {name}!"
+</script>
+
+<script type="text/x-python" data-task="t2">
+def celsius_to_fahrenheit(celsius):
+    pass
+#== tests ==
+check_close("celsius_to_fahrenheit(0)", celsius_to_fahrenheit(0), 32.0)
+check_close("celsius_to_fahrenheit(100)", celsius_to_fahrenheit(100), 212.0)
+check_close("celsius_to_fahrenheit(-40)", celsius_to_fahrenheit(-40), -40.0)
+check_close("celsius_to_fahrenheit(37) is body temperature", celsius_to_fahrenheit(37), 98.6)
+#== solution ==
+def celsius_to_fahrenheit(celsius):
+    return celsius * 9 / 5 + 32
+</script>
+
+<script type="text/x-python" data-task="t3">
+def fizzbuzz(n):
+    pass
+#== tests ==
+check("fizzbuzz(5)", fizzbuzz(5), ["1", "2", "Fizz", "4", "Buzz"])
+check("15 lands on FizzBuzz", fizzbuzz(15)[14], "FizzBuzz")
+check("every item is a string", all(isinstance(item, str) for item in fizzbuzz(20)), True)
+check("fizzbuzz(0) is empty", fizzbuzz(0), [])
+#== solution ==
+def fizzbuzz(n):
+    result = []
+    for i in range(1, n + 1):
+        if i % 15 == 0:
+            result.append("FizzBuzz")
+        elif i % 3 == 0:
+            result.append("Fizz")
+        elif i % 5 == 0:
+            result.append("Buzz")
+        else:
+            result.append(str(i))
+    return result
+</script>
+
+<script type="text/x-python" data-task="t4">
+def count_vowels(text):
+    pass
+#== tests ==
+check("count_vowels('hello world')", count_vowels("hello world"), 3)
+check("count_vowels('AEIOU') ignores case", count_vowels("AEIOU"), 5)
+check("count_vowels('rhythm')", count_vowels("rhythm"), 0)
+check("count_vowels('')", count_vowels(""), 0)
+#== solution ==
+def count_vowels(text):
+    total = 0
+    for ch in text:
+        if ch.lower() in "aeiou":
+            total += 1
+    return total
+</script>
+
+<script type="text/x-python" data-task="t5">
+def reverse_words(sentence):
+    pass
+#== tests ==
+check("reverse_words('the quick brown fox')", reverse_words("the quick brown fox"), "fox brown quick the")
+check("a single word is unchanged", reverse_words("python"), "python")
+check("extra spaces collapse", reverse_words("  a   b  "), "b a")
+check("reverse_words('')", reverse_words(""), "")
+#== solution ==
+def reverse_words(sentence):
+    return " ".join(sentence.split()[::-1])
+</script>
+
+<script type="text/x-python" data-task="t6">
+def second_largest(numbers):
+    pass
+#== tests ==
+check("second_largest([3, 1, 4, 1, 5])", second_largest([3, 1, 4, 1, 5]), 4)
+check("duplicates of the max do not count", second_largest([5, 5, 3]), 3)
+check("all equal gives None", second_largest([2, 2, 2]), None)
+check("empty list gives None", second_largest([]), None)
+check("negatives work too", second_largest([-1, -2, -3]), -2)
+#== solution ==
+def second_largest(numbers):
+    distinct = sorted(set(numbers))
+    if len(distinct) < 2:
+        return None
+    return distinct[-2]
+</script>
+
+<script type="text/x-python" data-task="t7">
+def word_count(text):
+    pass
+#== tests ==
+check("word_count('the cat the dog')", word_count("the cat the dog"), {"the": 2, "cat": 1, "dog": 1})
+check("counting ignores case", word_count("Go go GO"), {"go": 3})
+check("empty text gives an empty dict", word_count(""), {})
+#== solution ==
+def word_count(text):
+    counts = {}
+    for word in text.lower().split():
+        counts[word] = counts.get(word, 0) + 1
+    return counts
+</script>
+
+<script type="text/x-python" data-task="t8">
+def group_by_first_letter(words):
+    pass
+#== tests ==
+check("groups apple, avocado, beet", group_by_first_letter(["apple", "avocado", "beet"]), {"a": ["apple", "avocado"], "b": ["beet"]})
+check("the key is lowercased", group_by_first_letter(["Ant", "ape"]), {"a": ["Ant", "ape"]})
+check("empty strings are skipped", group_by_first_letter(["", "bee"]), {"b": ["bee"]})
+check("no words gives an empty dict", group_by_first_letter([]), {})
+#== solution ==
+def group_by_first_letter(words):
+    groups = {}
+    for word in words:
+        if not word:
+            continue
+        groups.setdefault(word[0].lower(), []).append(word)
+    return groups
+</script>
+
+<script type="text/x-python" data-task="t9">
+def dedupe(items):
+    pass
+#== tests ==
+check("dedupe([3, 1, 3, 2, 1])", dedupe([3, 1, 3, 2, 1]), [3, 1, 2])
+check("dedupe(['a', 'b', 'a'])", dedupe(["a", "b", "a"]), ["a", "b"])
+check("an already unique list is unchanged", dedupe([1, 2, 3]), [1, 2, 3])
+check("dedupe([])", dedupe([]), [])
+#== solution ==
+def dedupe(items):
+    seen = set()
+    result = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+</script>
+
+<script type="text/x-python" data-task="t10">
+def is_palindrome(text):
+    pass
+#== tests ==
+check("'A man, a plan, a canal: Panama'", is_palindrome("A man, a plan, a canal: Panama"), True)
+check("'hello' is not a palindrome", is_palindrome("hello"), False)
+check("an empty string counts", is_palindrome(""), True)
+check("digits count too: '12321'", is_palindrome("12321"), True)
+#== solution ==
+def is_palindrome(text):
+    cleaned = [ch.lower() for ch in text if ch.isalnum()]
+    return cleaned == cleaned[::-1]
+</script>
+
+<script type="text/x-python" data-task="t11">
+def fib(n):
+    pass
+#== tests ==
+check("fib(0)", fib(0), 0)
+check("fib(1)", fib(1), 1)
+check("the first eight numbers", [fib(i) for i in range(8)], [0, 1, 1, 2, 3, 5, 8, 13])
+check("fib(30) arrives quickly", fib(30), 832040)
+#== solution ==
+def fib(n):
+    a, b = 0, 1
+    for _ in range(n):
+        a, b = b, a + b
+    return a
+</script>
+
+<script type="text/x-python" data-task="t12">
+def flatten(nested):
+    pass
+#== tests ==
+check("flatten([1, [2, [3, [4]], 5]])", flatten([1, [2, [3, [4]], 5]]), [1, 2, 3, 4, 5])
+check("an already flat list is unchanged", flatten([1, 2, 3]), [1, 2, 3])
+check("flatten([])", flatten([]), [])
+check("empty lists disappear", flatten([[], [[]]]), [])
+check("values of any type survive", flatten(["a", ["b", 1]]), ["a", "b", 1])
+#== solution ==
+def flatten(nested):
+    result = []
+    for item in nested:
+        if isinstance(item, list):
+            result.extend(flatten(item))
+        else:
+            result.append(item)
+    return result
+</script>
+
+<script type="text/x-python" data-task="t13">
+class BankAccount:
+    def __init__(self, owner, balance=0):
+        pass
+
+    def deposit(self, amount):
+        pass
+
+    def withdraw(self, amount):
+        pass
+#== tests ==
+account = BankAccount("Ada", 100)
+check("account.owner", account.owner, "Ada")
+check("account.balance", account.balance, 100)
+check("balance defaults to 0", BankAccount("Ada").balance, 0)
+account.deposit(50)
+account.withdraw(20)
+check("100 + 50 - 20", account.balance, 130)
+check_raises("withdrawing more than the balance", lambda: BankAccount("Ada", 10).withdraw(20), ValueError)
+check_raises("deposit(0)", lambda: BankAccount("Ada", 10).deposit(0), ValueError)
+check_raises("withdraw(-5)", lambda: BankAccount("Ada", 10).withdraw(-5), ValueError)
+#== solution ==
+class BankAccount:
+    def __init__(self, owner, balance=0):
+        self.owner = owner
+        self.balance = balance
+
+    def deposit(self, amount):
+        if amount <= 0:
+            raise ValueError("Deposit must be positive")
+        self.balance += amount
+
+    def withdraw(self, amount):
+        if amount <= 0:
+            raise ValueError("Withdrawal must be positive")
+        if amount > self.balance:
+            raise ValueError("Insufficient funds")
+        self.balance -= amount
+</script>
+
+<script type="text/x-python" data-task="t14">
+class Stack:
+    def __init__(self):
+        pass
+
+    def push(self, item):
+        pass
+
+    def pop(self):
+        pass
+
+    def peek(self):
+        pass
+
+    def is_empty(self):
+        pass
+
+    def __len__(self):
+        pass
+#== tests ==
+stack = Stack()
+stack.push(1)
+stack.push(2)
+check("len() after two pushes", len(stack), 2)
+check("peek() sees the top", stack.peek(), 2)
+check("peek() removes nothing", len(stack), 2)
+check("pop() returns the top", stack.pop(), 2)
+check("pop() again returns the first item", stack.pop(), 1)
+check("a fresh stack is empty", Stack().is_empty(), True)
+check_raises("pop() on an empty stack", lambda: Stack().pop(), IndexError)
+check_raises("peek() on an empty stack", lambda: Stack().peek(), IndexError)
+#== solution ==
+class Stack:
+    def __init__(self):
+        self.items = []
+
+    def push(self, item):
+        self.items.append(item)
+
+    def pop(self):
+        if not self.items:
+            raise IndexError("pop from empty stack")
+        return self.items.pop()
+
+    def peek(self):
+        if not self.items:
+            raise IndexError("peek from empty stack")
+        return self.items[-1]
+
+    def is_empty(self):
+        return len(self.items) == 0
+
+    def __len__(self):
+        return len(self.items)
+</script>
+
+<script type="text/x-python" data-task="t15">
+def safe_int(value, default=0):
+    pass
+#== tests ==
+check("safe_int('42')", safe_int("42"), 42)
+check("safe_int('abc') falls back", safe_int("abc"), 0)
+check("safe_int(None, -1) uses the given default", safe_int(None, -1), -1)
+check("safe_int('7.9') is not an int", safe_int("7.9"), 0)
+check("real ints pass through", safe_int(7), 7)
+#== solution ==
+def safe_int(value, default=0):
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+</script>
+
+<script type="text/x-harness" id="harness">
+import sys
+from browser import window
+
+
+class _Capture:
+    def write(self, data):
+        window.pyOut(str(data))
+
+    def flush(self):
+        pass
+
+
+_cap = _Capture()
+sys.stdout = _cap
+sys.stderr = _cap
+
+
+def _fmt(exc):
+    try:
+        import traceback
+        return traceback.format_exc()
+    except BaseException:
+        return type(exc).__name__ + ": " + str(exc)
+
+
+_ns = {"__name__": "__main__"}
+_ok = True
+try:
+    exec(window.pySource, _ns)
+except BaseException as exc:
+    window.pyErr(_fmt(exc))
+    _ok = False
+
+_tests = str(window.pyTests)
+
+if _ok and _tests.strip():
+
+    def check(label, got, want):
+        window.pyCheck(label, got == want, repr(got), repr(want))
+
+    def check_close(label, got, want, tol=0.000001):
+        try:
+            good = abs(got - want) <= tol
+        except BaseException:
+            good = False
+        window.pyCheck(label, good, repr(got), repr(want))
+
+    def check_raises(label, fn, exc_type):
+        try:
+            value = fn()
+        except exc_type:
+            window.pyCheck(label, True, "raised " + exc_type.__name__, "raised " + exc_type.__name__)
+        except BaseException as other:
+            window.pyCheck(label, False, "raised " + type(other).__name__, "raised " + exc_type.__name__)
+        else:
+            window.pyCheck(label, False, "returned " + repr(value), "raised " + exc_type.__name__)
+
+    _tns = dict(_ns)
+    _tns["check"] = check
+    _tns["check_close"] = check_close
+    _tns["check_raises"] = check_raises
+    try:
+        exec(_tests, _tns)
+    except BaseException as exc:
+        window.pyErr(_fmt(exc))
+
+window.pyDone()
+</script>
+
+<script>
+(function () {
+  "use strict";
+
+  var LEVELS = [
+    { n: 1, name: "Basics", blurb: "strings, numbers, loops" },
+    { n: 2, name: "Strings & lists", blurb: "slicing, splitting, sorting" },
+    { n: 3, name: "Dicts & sets", blurb: "counting and grouping" },
+    { n: 4, name: "Logic & recursion", blurb: "conditions that nest" },
+    { n: 5, name: "Classes", blurb: "state and error handling" }
+  ];
+
+  var TASKS = [
+    {
+      id: "t1", level: 1, short: "greet", title: "greet(name)",
+      lede: "Return a greeting for whoever is passed in. The exact wording matters — the checks compare the string character for character.",
+      ex: [['greet("Ada")', '"Hello, Ada!"'], ['greet("Grace")', '"Hello, Grace!"']],
+      hint: "An f-string builds this in one line: <code>f\"Hello, {name}!\"</code>. The part in braces is evaluated and dropped into the text."
+    },
+    {
+      id: "t2", level: 1, short: "celsius_to_fahrenheit", title: "celsius_to_fahrenheit(celsius)",
+      lede: "Convert a Celsius temperature to Fahrenheit using <code>F = C × 9 / 5 + 32</code>. Return the number, don't print it.",
+      ex: [["celsius_to_fahrenheit(0)", "32.0"], ["celsius_to_fahrenheit(100)", "212.0"], ["celsius_to_fahrenheit(-40)", "-40.0"]],
+      hint: "Dividing with <code>/</code> always gives a float in Python 3, so <code>0</code> comes back as <code>32.0</code> rather than <code>32</code>. That is what the checks expect."
+    },
+    {
+      id: "t3", level: 1, short: "fizzbuzz", title: "fizzbuzz(n)",
+      lede: "Return a list covering the numbers 1 through n. Multiples of 3 become <code>\"Fizz\"</code>, multiples of 5 become <code>\"Buzz\"</code>, multiples of both become <code>\"FizzBuzz\"</code>, and everything else becomes the number as a string.",
+      ex: [["fizzbuzz(5)", '["1", "2", "Fizz", "4", "Buzz"]'], ["fizzbuzz(0)", "[]"]],
+      hint: "Test <code>i % 15 == 0</code> first — a number divisible by both 3 and 5 is divisible by 15, and if you check 3 first the FizzBuzz case never gets its turn."
+    },
+    {
+      id: "t4", level: 2, short: "count_vowels", title: "count_vowels(text)",
+      lede: "Count how many vowels (a, e, i, o, u) appear in the text. Upper and lower case both count.",
+      ex: [['count_vowels("hello world")', "3"], ['count_vowels("AEIOU")', "5"], ['count_vowels("rhythm")', "0"]],
+      hint: "Looping over a string gives you one character at a time. <code>ch.lower() in \"aeiou\"</code> handles the case question in one step."
+    },
+    {
+      id: "t5", level: 2, short: "reverse_words", title: "reverse_words(sentence)",
+      lede: "Reverse the order of the words — not the letters. Words are separated by whitespace, and the result is joined back together with single spaces.",
+      ex: [['reverse_words("the quick brown fox")', '"fox brown quick the"'], ['reverse_words("  a   b  ")', '"b a"']],
+      hint: "<code>sentence.split()</code> with no argument splits on any run of whitespace and drops the empty pieces, which is exactly what the third check wants. Then <code>[::-1]</code> reverses, and <code>\" \".join(...)</code> puts it back."
+    },
+    {
+      id: "t6", level: 2, short: "second_largest", title: "second_largest(numbers)",
+      lede: "Return the second largest <em>distinct</em> value. Repeats of the maximum don't count as second place, and if there aren't two different values, return <code>None</code>.",
+      ex: [["second_largest([3, 1, 4, 1, 5])", "4"], ["second_largest([5, 5, 3])", "3"], ["second_largest([2, 2, 2])", "None"]],
+      hint: "<code>set(numbers)</code> throws away duplicates and <code>sorted()</code> puts what's left in order — then the second largest is at index <code>-2</code>. Check the length before you index, or an empty list will raise IndexError."
+    },
+    {
+      id: "t7", level: 3, short: "word_count", title: "word_count(text)",
+      lede: "Return a dictionary mapping each word to how many times it appears, ignoring case. Split on whitespace only — punctuation stays stuck to its word.",
+      ex: [['word_count("the cat the dog")', '{"the": 2, "cat": 1, "dog": 1}'], ['word_count("Go go GO")', '{"go": 3}']],
+      hint: "The first time you see a word it isn't in the dictionary yet, so <code>counts[word] + 1</code> raises KeyError. <code>counts.get(word, 0) + 1</code> supplies a 0 for the first sighting."
+    },
+    {
+      id: "t8", level: 3, short: "group_by_first_letter", title: "group_by_first_letter(words)",
+      lede: "Bucket the words by their first letter, lowercased. Words keep their original order inside each bucket, and empty strings are skipped entirely.",
+      ex: [['group_by_first_letter(["apple", "avocado", "beet"])', '{"a": ["apple", "avocado"], "b": ["beet"]}']],
+      hint: "<code>groups.setdefault(letter, []).append(word)</code> creates the list on first use and appends to it every time after — one line instead of an if/else."
+    },
+    {
+      id: "t9", level: 3, short: "dedupe", title: "dedupe(items)",
+      lede: "Remove duplicates but keep the order they first appeared in. (Note that <code>list(set(items))</code> won't do — a set has no order.)",
+      ex: [["dedupe([3, 1, 3, 2, 1])", "[3, 1, 2]"], ['dedupe(["a", "b", "a"])', '["a", "b"]']],
+      hint: "Keep two things: a <code>set</code> of what you have already seen, and the result list. Membership tests on a set stay fast no matter how long the list gets; on a list they get slower and slower."
+    },
+    {
+      id: "t10", level: 4, short: "is_palindrome", title: "is_palindrome(text)",
+      lede: "Return <code>True</code> when the text reads the same backwards. Compare letters and digits only — case, spaces and punctuation are all ignored.",
+      ex: [['is_palindrome("A man, a plan, a canal: Panama")', "True"], ['is_palindrome("hello")', "False"], ['is_palindrome("")', "True"]],
+      hint: "Clean first, compare second. <code>ch.isalnum()</code> decides what to keep; then a reversed copy with <code>[::-1]</code> either equals the cleaned version or it doesn't."
+    },
+    {
+      id: "t11", level: 4, short: "fib", title: "fib(n)",
+      lede: "Return the nth Fibonacci number, counting from <code>fib(0) == 0</code> and <code>fib(1) == 1</code>. Each number after that is the sum of the two before it.",
+      ex: [["fib(2)", "1"], ["fib(7)", "13"], ["fib(30)", "832040"]],
+      hint: "Plain recursion works but recomputes the same values thousands of times — <code>fib(30)</code> may hang the page. A loop that carries two values, <code>a, b = b, a + b</code>, gets there instantly."
+    },
+    {
+      id: "t12", level: 4, short: "flatten", title: "flatten(nested)",
+      lede: "Flatten a list of lists — nested to any depth — into one flat list, in order.",
+      ex: [["flatten([1, [2, [3, [4]], 5]])", "[1, 2, 3, 4, 5]"], ["flatten([[], [[]]])", "[]"]],
+      hint: "This is the classic case for recursion: if an item <code>isinstance(item, list)</code>, flatten it and <code>extend</code> the result; otherwise <code>append</code> the item. The empty list is the base case that stops it."
+    },
+    {
+      id: "t13", level: 5, short: "BankAccount", title: "class BankAccount",
+      lede: "A small account object. <code>__init__</code> takes an owner and an optional starting balance (default 0), stored as <code>self.owner</code> and <code>self.balance</code>. <code>deposit</code> and <code>withdraw</code> change the balance, and both raise <code>ValueError</code> for an amount of zero or less. <code>withdraw</code> also raises <code>ValueError</code> when the amount exceeds the balance.",
+      ex: [['a = BankAccount("Ada", 100)', ""], ["a.deposit(50); a.withdraw(20)", ""], ["a.balance", "130"]],
+      hint: "<code>raise ValueError(\"Insufficient funds\")</code> ends the method right there — nothing after it runs, so check the bad cases before you touch <code>self.balance</code>."
+    },
+    {
+      id: "t14", level: 5, short: "Stack", title: "class Stack",
+      lede: "A last-in, first-out stack. <code>push</code> adds an item, <code>pop</code> removes and returns the newest, <code>peek</code> returns it without removing, <code>is_empty</code> reports emptiness, and <code>__len__</code> makes <code>len(stack)</code> work. <code>pop</code> and <code>peek</code> raise <code>IndexError</code> on an empty stack.",
+      ex: [["s = Stack(); s.push(1); s.push(2)", ""], ["s.peek()", "2"], ["s.pop()", "2"], ["len(s)", "1"]],
+      hint: "A plain list does the real work: <code>append</code> is push and <code>.pop()</code> with no argument is pop. Defining <code>__len__</code> is what lets the built-in <code>len()</code> see inside your class."
+    },
+    {
+      id: "t15", level: 5, short: "safe_int", title: "safe_int(value, default=0)",
+      lede: "Convert a value to an int, returning <code>default</code> whenever that conversion fails instead of letting the error escape.",
+      ex: [['safe_int("42")', "42"], ['safe_int("abc")', "0"], ["safe_int(None, -1)", "-1"], ['safe_int("7.9")', "0"]],
+      hint: "<code>int(\"abc\")</code> raises ValueError and <code>int(None)</code> raises TypeError, so catch both: <code>except (ValueError, TypeError):</code>. Catching bare <code>except:</code> would also swallow bugs you want to see."
+    }
+  ];
+
+  var HARNESS = document.getElementById("harness").textContent;
+  var STORE_KEY = "python-practice.v1";
+
+  var el = {
+    rail: document.getElementById("rail"),
+    brief: document.getElementById("brief"),
+    title: document.getElementById("task-title"),
+    code: document.getElementById("code"),
+    gutter: document.getElementById("gutter"),
+    stream: document.getElementById("stream"),
+    checks: document.getElementById("checks"),
+    verdict: document.getElementById("verdict"),
+    score: document.getElementById("score"),
+    ticks: document.getElementById("ticks"),
+    runBtn: document.getElementById("run-btn"),
+    resetBtn: document.getElementById("reset-btn"),
+    runtime: document.getElementById("runtime"),
+    runtimeText: document.getElementById("runtime-text")
+  };
+
+  /* ---------- python source blocks ---------- */
+  var SOURCE = {};
+  Array.prototype.forEach.call(document.querySelectorAll("script[data-task]"), function (node) {
+    var text = node.textContent.replace(/^\n/, "").replace(/\s+$/, "");
+    var testSplit = text.split("\n#== tests ==\n");
+    var rest = testSplit[1] || "";
+    var solSplit = rest.split("\n#== solution ==\n");
+    SOURCE[node.getAttribute("data-task")] = {
+      starter: testSplit[0],
+      tests: solSplit[0],
+      solution: solSplit[1] || ""
+    };
+  });
+
+  function taskById(id) {
+    for (var i = 0; i < TASKS.length; i++) { if (TASKS[i].id === id) return TASKS[i]; }
+    return TASKS[0];
+  }
+
+  /* ---------- persistence ---------- */
+  var store = { tasks: {}, updatedAt: 0 };
+  var loadedStamp = 0;
+  var current = TASKS[0].id;
+  var touched = false;
+
+  function readLocal() {
+    try {
+      var raw = window.localStorage.getItem(STORE_KEY);
+      if (!raw) return;
+      var parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && parsed.tasks) {
+        store.tasks = sanitize(parsed.tasks);
+        store.updatedAt = typeof parsed.updatedAt === "number" ? parsed.updatedAt : 0;
+        loadedStamp = store.updatedAt;
+        if (typeof parsed.current === "string" && SOURCE[parsed.current]) current = parsed.current;
+      }
+    } catch (err) { /* private mode, blocked storage: start fresh */ }
+  }
+
+  function sanitize(tasks) {
+    var clean = {};
+    Object.keys(tasks || {}).forEach(function (id) {
+      if (!SOURCE[id]) return;
+      var entry = tasks[id] || {};
+      clean[id] = {
+        code: typeof entry.code === "string" ? entry.code.slice(0, 20000) : "",
+        passed: entry.passed === true
+      };
+    });
+    return clean;
+  }
+
+  var saveTimer = null;
+  function save() {
+    store.updatedAt = Date.now();
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(function () {
+      try {
+        window.localStorage.setItem(STORE_KEY, JSON.stringify({
+          tasks: store.tasks, updatedAt: store.updatedAt, current: current
+        }));
+      } catch (err) { /* nothing we can do; the session still works */ }
+      pushRemote();
+    }, 400);
+  }
+
+  function entry(id) {
+    if (!store.tasks[id]) store.tasks[id] = { code: "", passed: false };
+    return store.tasks[id];
+  }
+
+  /* ---------- optional cross-device sync ---------- */
+  var remoteDoc = null;
+  var remoteTimer = null;
+
+  function pushRemote() {
+    if (!remoteDoc) return;
+    clearTimeout(remoteTimer);
+    remoteTimer = setTimeout(function () {
+      try {
+        remoteDoc.set({ tasks: store.tasks, updatedAt: store.updatedAt }).catch(function () {});
+      } catch (err) { /* sync is a bonus, never a requirement */ }
+    }, 1500);
+  }
+
+  function initRemote() {
+    if (!window.claude || typeof window.claude.use !== "function") return;
+    window.claude.use("db").then(function (db) {
+      if (!db) return;
+      remoteDoc = db.doc("progress/main");
+      return remoteDoc.get().then(function (snap) {
+        if (!snap || !snap.exists || !snap.data) return;
+        var stamp = typeof snap.data.updatedAt === "number" ? snap.data.updatedAt : 0;
+        if (stamp <= loadedStamp || touched) return;
+        store.tasks = sanitize(snap.data.tasks);
+        store.updatedAt = stamp;
+        renderRail();
+        openTask(current);
+      });
+    }).catch(function () { /* offline-first: local storage already has it */ });
+  }
+
+  /* ---------- rail ---------- */
+  function renderRail() {
+    var html = "";
+    LEVELS.forEach(function (level) {
+      html += '<div class="level-head"><i>Level ' + level.n + '</i> &middot; ' + level.name + '</div>';
+      TASKS.filter(function (t) { return t.level === level.n; }).forEach(function (task) {
+        var saved = store.tasks[task.id];
+        var state = saved && saved.passed ? "done" : (saved && saved.code ? "started" : "");
+        html += '<button class="task-btn' + (task.id === current ? " active" : "") +
+          '" type="button" data-goto="' + task.id + '">' +
+          '<span class="task-num">' + (TASKS.indexOf(task) + 1) + '</span>' +
+          '<span class="task-name">' + task.short + '</span>' +
+          '<span class="dot ' + state + '"></span></button>';
+      });
+    });
+    el.rail.innerHTML = html;
+
+    var done = 0;
+    var ticks = "";
+    TASKS.forEach(function (task) {
+      var passed = store.tasks[task.id] && store.tasks[task.id].passed;
+      if (passed) done++;
+      ticks += '<span class="tick' + (passed ? " on" : "") + '" title="' + task.short + '"></span>';
+    });
+    el.ticks.innerHTML = ticks;
+    el.score.textContent = done + " / " + TASKS.length;
+  }
+
+  el.rail.addEventListener("click", function (event) {
+    var btn = event.target.closest("[data-goto]");
+    if (btn) openTask(btn.getAttribute("data-goto"));
+  });
+
+  /* ---------- brief ---------- */
+  function renderBrief(task) {
+    var index = TASKS.indexOf(task) + 1;
+    var level = LEVELS[task.level - 1];
+    var exRows = task.ex.map(function (pair) {
+      return pair[1]
+        ? escapeHtml(pair[0]) + '  <span class="arrow">→</span>  ' + escapeHtml(pair[1])
+        : escapeHtml(pair[0]);
+    }).join("\n");
+
+    el.title.innerHTML = "Task " + index + " · <code>" + escapeHtml(task.title) + "</code>";
+    el.brief.innerHTML =
+      '<p class="eyebrow">Level ' + task.level + ' — ' + escapeHtml(level.name) + '</p>' +
+      '<h2>' + escapeHtml(task.title) + '</h2>' +
+      '<p class="brief-lede">' + task.lede + '</p>' +
+      '<div class="examples"><div class="examples-head">Expected</div><pre>' + exRows + '</pre></div>' +
+      '<p class="hint">' + task.hint + '</p>' +
+      '<details><summary>Show one way to write it</summary><pre>' +
+      escapeHtml(SOURCE[task.id].solution) + '</pre></details>';
+    el.brief.scrollTop = 0;
+  }
+
+  function escapeHtml(text) {
+    return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  /* ---------- editor ---------- */
+  function renderGutter() {
+    var lines = el.code.value.split("\n").length;
+    var html = "";
+    for (var i = 1; i <= lines; i++) html += "<div>" + i + "</div>";
+    el.gutter.innerHTML = html;
+    el.gutter.scrollTop = el.code.scrollTop;
+  }
+
+  el.code.addEventListener("scroll", function () { el.gutter.scrollTop = el.code.scrollTop; });
+  el.code.addEventListener("input", function () {
+    touched = true;
+    renderGutter();
+    entry(current).code = el.code.value;
+    save();
+  });
+
+  el.code.addEventListener("keydown", function (event) {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      run();
+      return;
+    }
+    if (event.key === "Tab") {
+      event.preventDefault();
+      insert("    ");
+      return;
+    }
+    if (event.key === "Enter") {
+      var start = el.code.selectionStart;
+      var before = el.code.value.slice(0, start);
+      var line = before.slice(before.lastIndexOf("\n") + 1);
+      var indent = (line.match(/^[ \t]*/) || [""])[0];
+      if (/:\s*$/.test(line)) indent += "    ";
+      event.preventDefault();
+      insert("\n" + indent);
+    }
+  });
+
+  function insert(text) {
+    var start = el.code.selectionStart;
+    var end = el.code.selectionEnd;
+    el.code.setRangeText(text, start, end, "end");
+    el.code.dispatchEvent(new Event("input"));
+  }
+
+  /* ---------- run ---------- */
+  var outBuf = "";
+  var errBuf = "";
+  var rows = [];
+  var finished = false;
+
+  window.pyOut = function (text) { outBuf += text; };
+  window.pyErr = function (text) { errBuf += text; };
+  window.pyCheck = function (label, ok, got, want) {
+    rows.push({ label: String(label), ok: !!ok, got: String(got), want: String(want) });
+  };
+  window.pyDone = function () { finished = true; renderResults(); };
+
+  var pyReady = false;
+  var pyFailed = false;
+  var RUNTIME_OFF = '<span class="placeholder">The in-browser Python runtime could not load, so the Run button is off. Every task, hint and solution above still reads normally, and the same 15 tasks run locally from the <code>python-practice/</code> folder in the repo.</span>';
+
+  function run() {
+    if (!pyReady) return;
+    outBuf = ""; errBuf = ""; rows = []; finished = false;
+    window.pySource = el.code.value;
+    window.pyTests = SOURCE[current].tests;
+
+    var previous = document.getElementById("py-exec");
+    if (previous) previous.remove();
+    var node = document.createElement("script");
+    node.type = "text/python";
+    node.id = "py-exec";
+    node.textContent = HARNESS;
+    document.body.appendChild(node);
+
+    try {
+      window.brython({ debug: 0 });
+    } catch (err) {
+      errBuf += "The Python runtime stopped unexpectedly: " + err.message;
+    }
+    if (!finished) renderResults();
+  }
+
+  function renderResults() {
+    var passed = rows.length > 0 && !errBuf && rows.every(function (r) { return r.ok; });
+
+    var streamHtml = "";
+    if (outBuf) streamHtml += escapeHtml(outBuf);
+    if (errBuf) streamHtml += '<span class="trace">' + escapeHtml(errBuf) + "</span>";
+    el.stream.innerHTML = streamHtml ||
+      '<span class="placeholder">No output. Add a <code>print(...)</code> inside your function to watch what it does.</span>';
+
+    if (rows.length) {
+      el.checks.innerHTML = rows.map(function (r) {
+        var detail = r.ok ? "" :
+          '<div class="check-detail"><span><b>got</b> <span class="got">' + escapeHtml(r.got) +
+          '</span></span><span><b>expected</b> <span class="want">' + escapeHtml(r.want) + "</span></span></div>";
+        return '<div class="check ' + (r.ok ? "ok" : "no") + '"><span class="mark">' +
+          (r.ok ? "✓" : "✗") + '</span><div><div class="check-label">' + escapeHtml(r.label) +
+          "</div>" + detail + "</div></div>";
+      }).join("");
+    } else {
+      el.checks.innerHTML = errBuf
+        ? '<span class="placeholder">Python stopped before the checks could run. The message on the left says where.</span>'
+        : '<span class="placeholder">No checks ran.</span>';
+    }
+
+    var passCount = rows.filter(function (r) { return r.ok; }).length;
+    el.verdict.className = "verdict " + (passed ? "pass" : (rows.length || errBuf ? "fail" : ""));
+    el.verdict.textContent = errBuf && !rows.length ? "error"
+      : passed ? "all " + rows.length + " checks pass"
+      : rows.length ? passCount + " of " + rows.length + " checks pass"
+      : "not run yet";
+
+    var record = entry(current);
+    record.code = el.code.value;
+    if (record.passed !== passed) {
+      record.passed = passed;
+      renderRail();
+    }
+    save();
+  }
+
+  /* ---------- task switching ---------- */
+  function openTask(id) {
+    if (!SOURCE[id]) id = TASKS[0].id;
+    current = id;
+    touched = false;
+    var task = taskById(id);
+    var saved = store.tasks[id];
+    el.code.value = saved && saved.code ? saved.code : SOURCE[id].starter;
+    renderGutter();
+    renderBrief(task);
+    renderRail();
+    el.stream.innerHTML = '<span class="placeholder">Anything you <code>print()</code> shows up here.</span>';
+    el.checks.innerHTML = pyFailed ? RUNTIME_OFF
+      : saved && saved.passed
+      ? '<span class="placeholder">You solved this one earlier. Run it again to confirm.</span>'
+      : '<span class="placeholder">Press <b>Run &amp; check</b> to test your answer against the task.</span>';
+    el.verdict.className = "verdict";
+    el.verdict.textContent = "not run yet";
+    save();
+  }
+
+  el.resetBtn.addEventListener("click", function () {
+    el.code.value = SOURCE[current].starter;
+    entry(current).code = "";
+    renderGutter();
+    renderRail();
+    save();
+    el.code.focus();
+  });
+  el.runBtn.addEventListener("click", run);
+
+  /* ---------- boot the python runtime ---------- */
+  var BASES = [
+    "https://cdnjs.cloudflare.com/ajax/libs/brython/3.12.4/",
+    "https://cdn.jsdelivr.net/npm/brython@3.12.4/",
+    "https://cdn.jsdelivr.net/npm/brython@3/",
+    "https://cdnjs.cloudflare.com/ajax/libs/brython/3.11.3/"
+  ];
+
+  function loadScript(url) {
+    return new Promise(function (resolve, reject) {
+      var node = document.createElement("script");
+      var timer = setTimeout(function () { reject(new Error("timeout")); }, 20000);
+      node.src = url;
+      node.onload = function () { clearTimeout(timer); resolve(); };
+      node.onerror = function () { clearTimeout(timer); reject(new Error("failed")); };
+      document.head.appendChild(node);
+    });
+  }
+
+  function bootPython() {
+    var index = 0;
+    function attempt() {
+      if (index >= BASES.length) return Promise.resolve(false);
+      var base = BASES[index++];
+      return loadScript(base + "brython.min.js").then(function () {
+        if (typeof window.brython !== "function") return attempt();
+        return loadScript(base + "brython_stdlib.min.js")
+          .catch(function () { /* core alone covers every task here */ })
+          .then(function () { return true; });
+      }).catch(attempt);
+    }
+    return attempt();
+  }
+
+  function markRuntime(state, text) {
+    el.runtime.className = "runtime " + state;
+    el.runtimeText.textContent = text;
+  }
+
+  /* ---------- start ---------- */
+  if (!/Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)) {
+    el.runBtn.querySelector("kbd").textContent = "Ctrl \u23CE";
+  }
+
+  readLocal();
+  renderRail();
+  openTask(current);
+  initRemote();
+
+  bootPython().then(function (ok) {
+    pyReady = ok;
+    if (ok) {
+      el.runBtn.disabled = false;
+      markRuntime("ready", "Python ready");
+    } else {
+      pyFailed = true;
+      markRuntime("failed", "Python unavailable");
+      el.checks.innerHTML = RUNTIME_OFF;
+    }
+  });
+})();
+</script>

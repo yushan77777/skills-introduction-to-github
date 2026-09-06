@@ -53,6 +53,17 @@ Work through them in order — each level leans on ideas from the one before it.
 - Every answer is written out in `solutions/`. Try it yourself first, then
   compare — the interesting part is usually *why* the solution is shorter.
 
+## Prefer to type in the browser?
+
+The same 15 tasks are published as an interactive page with a built-in editor
+that runs your Python in the browser and checks each answer as you go:
+
+**https://claude.ai/code/artifact/77f2dff0-6ca0-46ba-a095-34d680feacc8**
+
+Its source is `browser-console.html`. That file is the body of a Claude
+Artifact, so it has no `<html>`/`<head>` wrapper of its own - the hosted page
+above is the way to use it.
+
 ## Also useful
 
 - `python3 check.py --solutions` runs the tests against `solutions/` instead of
