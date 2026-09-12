@@ -1,0 +1,1 @@
+Drop each ATM's journal files into a folder named after the ATM, e.g. ATM_EJOURNALS/A0023011/EJOURNAL_10092026_00.TXT

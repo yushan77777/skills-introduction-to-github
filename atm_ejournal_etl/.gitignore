@@ -1,0 +1,16 @@
+# Runtime artefacts - the directories are kept, their contents are not committed.
+logs/*
+!logs/.gitkeep
+parquet/*
+!parquet/.gitkeep
+processed/*
+!processed/.gitkeep
+
+# Never commit the key store or a decrypted secret.
+config/pickle/*
+!config/pickle/.gitkeep
+
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/

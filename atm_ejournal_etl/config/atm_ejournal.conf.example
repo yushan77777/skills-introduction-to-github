@@ -1,0 +1,223 @@
+# =============================================================================
+# EXAMPLE configuration - DUMMY VALUES ONLY, never use as-is in production.
+# Copy to config/atm_ejournal.conf and replace hosts, paths, users and the
+# encrypted passwords with the values for your environment.
+# =============================================================================
+# =============================================================================
+# ATM E-Journal ETL - central configuration
+# =============================================================================
+# YAML, same style as the existing spark/table configuration file.
+#
+#   * Passwords are stored in ENCRYPTED form only (Fernet token produced by the
+#     project encryptor). The pickle holding the key is referenced per section.
+#   * ${VAR} / ${VAR:-default} are expanded from the process environment, so the
+#     same file works in DEV/UAT/PROD without code changes.
+#   * Every ETL lives under `etls:` - add a second key to run a second journal
+#     feed with its own paths, table and batch size (see README, section 12).
+#
+# Nothing in this file is read directly by business logic; src/config_loader.py
+# resolves `defaults` -> `etls.<name>` -> environment overrides.
+# =============================================================================
+
+# --------------------------------------------------------------------------- #
+# Paths that anchor every relative path in this file.
+# --------------------------------------------------------------------------- #
+project:
+  BASE_DIR: "${ATM_ETL_HOME:-.}"
+  ETL_NAME: "atm_ejournal"
+  ENVIRONMENT: "${ATM_ETL_ENV:-UAT}"
+
+# --------------------------------------------------------------------------- #
+# Encryption / decryption (reuses the project encryptor + pickle key store).
+# --------------------------------------------------------------------------- #
+encryption:
+  # Python module that holds the existing encryptor implementation. It is
+  # imported from src/; drop the supplied encryptor file there and keep this
+  # name in sync. A comma separated list is tried in order.
+  MODULE: "encryptor,encryption,enc_util"
+  # Callable/attribute used to decrypt: <module>.<FACTORY>(pickle_path) or a
+  # module level function get_decrypt_data(value).
+  FACTORY: "Encryptor"
+  DECRYPT_METHOD: "get_decrypt_data"
+  ENCRYPT_METHOD: "get_encrypt_data"
+  PICKLE_PATH: "config/pickle/encryption.pkl"
+  # When the supplied encryptor module is not present, fall back to the
+  # equivalent built-in Fernet + pickle implementation (same token format).
+  ALLOW_BUILTIN_FALLBACK: true
+
+# --------------------------------------------------------------------------- #
+# Values shared by every ETL defined under `etls:`.
+# --------------------------------------------------------------------------- #
+defaults:
+
+  input:
+    INPUT_PATH: "/etl/atm_ejournal/input"
+    # Glob applied to the file name only. Comma separated list, * = everything.
+    FILE_PATTERN: "*.TXT,*.txt,*.log,*.LOG"
+    # Files per batch. The driver never holds more than this many paths.
+    BATCH_SIZE: 500
+    # Stop after N batches in one run (0 = run until every file is processed).
+    MAX_BATCHES_PER_RUN: 0
+    # Open files with an unknown extension and look for journal headers.
+    SNIFF_UNKNOWN_EXTENSIONS: false
+    # Skip files still being written to (age in seconds, 0 = disabled).
+    MIN_FILE_AGE_SECONDS: 60
+    # Count the directory before processing so the log and the success e-mail
+    # can report discovered/previously processed/remaining. Metadata only; set
+    # to false for directories where even a metadata walk is too expensive.
+    PRESCAN_ENABLED: true
+    # Folder depth that carries ATM_NO: 1 = ATM_EJOURNALS/<ATM_NO>/file.txt
+    ATM_FOLDER_DEPTH: 1
+    ENCODING: "latin-1"
+
+  tracking:
+    PROCESSED_FILES_CSV: "/etl/atm_ejournal/processed/processed_files.csv"
+    # Batch intent markers written before the Greenplum load and removed after
+    # the tracking CSV has been updated. Used by the restart/recovery step.
+    PENDING_DIR: "processed/pending"
+    # Per-run metrics written for the Airflow success e-mail.
+    RUN_SUMMARY_DIR: "processed/run_summary"
+    # File identity used to recognise an already processed file:
+    #   path        - path relative to INPUT_PATH (default, cheapest)
+    #   path_size   - path + byte size (detects a re-delivered/changed file)
+    #   path_mtime  - path + byte size + modification time
+    FILE_KEY_MODE: "path"
+
+  parquet:
+    PARQUET_PATH: "/etl/atm_ejournal/parquet"
+    PARQUET_COMPRESSION: "snappy"
+    # Output files per batch. 0 = leave Spark's partitioning alone.
+    PARQUET_COALESCE_PARTITIONS: 4
+    PARQUET_CLEANUP_ENABLED: true
+    # Keep the parquet of a failed batch for troubleshooting.
+    PARQUET_KEEP_FAILED_BATCHES: true
+    # Delete leftover parquet of failed batches older than this (0 = never).
+    PARQUET_FAILED_RETENTION_DAYS: 7
+
+  logging:
+    LOG_PATH: "/etl/atm_ejournal/logs"
+    LOG_LEVEL: "INFO"
+    CONSOLE_LOG_LEVEL: "INFO"
+    LOG_FILE_PREFIX: "atm_ejournal_etl"
+    BATCH_LOG_FILE_PREFIX: "batch"
+    LOG_FORMAT: "%(asctime)s %(levelname)-8s %(name)s [%(batch_id)s] %(message)s"
+    LOG_RETENTION_DAYS: 365
+    MAX_LOG_SIZE_GB: 1
+    LOG_CLEANUP_ENABLED: true
+
+  spark:
+    SPARK_APP_NAME: "atm_ejournal_etl"
+    SPARK_MASTER: "spark://spark-master.example.local:7077"
+    SPARK_JARS: "/opt/jars/postgresql-42.2.18.jar,/opt/jars/greenplum-connector-apache-spark-scala_2.12-2.2.0.jar"
+    SPARK_EXECUTOR_INSTANCES: "8"
+    SPARK_EXECUTOR_MEMORY: "10g"
+    SPARK_EXECUTOR_CORES: "4"
+    SPARK_CORES_MAX: "32"
+    SPARK_DRIVER_MEMORY: "10g"
+    SPARK_LOCAL_DIR: "/opt/spark/tmp/"
+    SPARK_EXECUTOR_JAVA_OPTIONS: "-Djava.io.tmpdir=/opt/spark/tmp/ -Doracle.jdbc.timezoneAsRegion=false -Duser.timezone=UTC"
+    SPARK_DRIVER_JAVA_OPTIONS: "-Djava.io.tmpdir=/opt/spark/tmp/ -Doracle.jdbc.timezoneAsRegion=false -Duser.timezone=UTC"
+    SPARK_LOG_LEVEL: "WARN"
+    # Parse tasks per batch. 0 = one task per (SPARK_EXECUTOR_INSTANCES x
+    # SPARK_EXECUTOR_CORES) slot; files are distributed, never read on driver.
+    SPARK_PARSE_PARTITIONS: 0
+    SPARK_SHUFFLE_PARTITIONS: "64"
+    EXTRA_CONF:
+      spark.sql.session.timeZone: "UTC"
+      spark.sql.parquet.compression.codec: "snappy"
+      spark.sql.files.ignoreCorruptFiles: "true"
+
+  greenplum:
+    GREENPLUM_HOST: "greenplum.example.local"
+    GREENPLUM_PORT: 5432
+    GREENPLUM_DATABASE: "example_db"
+    GREENPLUM_SCHEMA: "atm"
+    GREENPLUM_TABLE: "atm_ejournal_withdrawals"
+    GREENPLUM_STAGING_TABLE: "atm_ejournal_withdrawals_stg"
+    GREENPLUM_CONTROL_TABLE: "atm_ejournal_batch_control"
+    GREENPLUM_USER: "example_user"
+    # Encrypted with the project encryptor - never store a plaintext password.
+    # Produce the token with:  python3 src/encryption_util.py --config <this file>
+    GREENPLUM_PASSWORD: "REPLACE_WITH_ENCRYPTED_PASSWORD"
+    GREENPLUM_PICKLE: "config/pickle/encryption.pkl"
+    GREENPLUM_DRIVER: "org.postgresql.Driver"
+    # greenplum = greenplum-spark connector, jdbc = postgresql JDBC writer.
+    GREENPLUM_WRITE_FORMAT: "greenplum"
+    GREENPLUM_JDBC_BATCH_SIZE: 20000
+    # Parallel writers into Greenplum (0 = leave the DataFrame as it is).
+    GREENPLUM_WRITE_PARTITIONS: 8
+    # Idempotency strategy, see README "Greenplum loading":
+    #   delete_insert_by_source_file (default) | insert_only | merge_by_key |
+    #   truncate_load
+    GREENPLUM_LOAD_STRATEGY: "delete_insert_by_source_file"
+    GREENPLUM_MERGE_KEYS: "ATM_NO,TRANSACTION_REF,TRANSACTION_DATETIME,AMOUNT"
+    # Distribution keys used when the ETL creates the tables itself. Leave empty
+    # on plain PostgreSQL (DISTRIBUTED BY is Greenplum only).
+    GREENPLUM_TARGET_DISTRIBUTED_BY: "ATM_NO"
+    GREENPLUM_CONTROL_DISTRIBUTED_BY: "batch_id"
+    GREENPLUM_CREATE_OBJECTS: true
+    GREENPLUM_QUERY_TIMEOUT_SECONDS: 3600
+
+  parser:
+    # Forwarded unchanged to atm_ejournal_parser.deduplicate_attempts().
+    KEEP_LAST_FAILURE: true
+    LINK_FAILED_ACROSS_AMOUNTS: false
+    RETRY_WINDOW_SECONDS: 180
+    # Keep low-confidence blocks in the loaded data (PARSE_CONFIDENT = false).
+    KEEP_UNPARSED_RECORDS: true
+
+  mail:
+    MAIL_ENABLED: true
+    SMTP_HOST: "smtp.example.local"
+    SMTP_PORT: 25
+    SMTP_USE_TLS: false
+    SMTP_USER: ""
+    # Encrypted in the same way as the Greenplum password ("" = no auth).
+    SMTP_PASSWORD: ""
+    SMTP_PICKLE: "config/pickle/encryption.pkl"
+    SMTP_TIMEOUT_SECONDS: 30
+    MAIL_FROM: "atm-etl@example.com"
+    MAIL_TO: "data-ops@example.com"
+    MAIL_CC: ""
+    MAIL_SUBJECT_SUCCESS: "[${ATM_ETL_ENV:-UAT}] ATM E-Journal ETL SUCCESS"
+    MAIL_SUBJECT_FAILURE: "[${ATM_ETL_ENV:-UAT}] ATM E-Journal ETL FAILED"
+
+  airflow:
+    AIRFLOW_DAG_ID: "atm_ejournal_etl"
+    AIRFLOW_SCHEDULE: "0 2 * * *"
+    AIRFLOW_START_DATE: "2026-01-01"
+    AIRFLOW_CATCHUP: false
+    AIRFLOW_RETRIES: 2
+    AIRFLOW_RETRY_DELAY_MINUTES: 10
+    AIRFLOW_EXECUTION_TIMEOUT_MINUTES: 720
+    AIRFLOW_MAX_ACTIVE_RUNS: 1
+    AIRFLOW_OWNER: "data-engineering"
+    AIRFLOW_TAGS: "atm,ejournal,greenplum,spark"
+    # Command used by the DAG to launch the ETL.
+    AIRFLOW_PYTHON_BIN: "python3"
+    AIRFLOW_SPARK_SUBMIT_BIN: ""
+    AIRFLOW_ETL_HOME: "${ATM_ETL_HOME:-/etl/atm_ejournal}"
+
+# --------------------------------------------------------------------------- #
+# One entry per ETL. Everything not repeated here is taken from `defaults`.
+# --------------------------------------------------------------------------- #
+etls:
+
+  atm_ejournal:
+    input:
+      INPUT_PATH: "${ATM_ETL_INPUT:-/etl/atm_ejournal/input}"
+      BATCH_SIZE: 500
+    greenplum:
+      GREENPLUM_TABLE: "atm_ejournal_withdrawals"
+
+  # Second feed, same code path, different directory/table/batch size.
+  # atm_ejournal_archive:
+  #   input:
+  #     INPUT_PATH: "/etl/atm_ejournal/archive"
+  #     BATCH_SIZE: 2000
+  #   parquet:
+  #     PARQUET_PATH: "parquet_archive"
+  #   tracking:
+  #     PROCESSED_FILES_CSV: "processed/processed_files_archive.csv"
+  #   greenplum:
+  #     GREENPLUM_TABLE: "atm_ejournal_withdrawals_archive"
