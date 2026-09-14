@@ -36,7 +36,6 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config_loader import EtlConfig, load_config                      # noqa: E402
-from encryption_util import SecretResolver                            # noqa: E402
 from file_registry import (DiscoveredFile, PendingBatchStore,          # noqa: E402
                            ProcessedFileRegistry, discover_files,
                            format_batch_id, iter_batches)
@@ -149,7 +148,6 @@ class AtmEjournalEtl:
         self.log_manager = LogManager(cfg, run_id=self.run_id)
         self.summary = RunSummary(run_id=self.run_id, etl_name=cfg.etl_name,
                                   environment=cfg.environment)
-        self.secret_resolver = SecretResolver.from_config(cfg)
         self.registry = ProcessedFileRegistry(
             cfg.path("tracking.PROCESSED_FILES_CSV", "processed/processed_files.csv"),
             key_mode=str(cfg.get("tracking.FILE_KEY_MODE", "path")))
@@ -207,12 +205,11 @@ class AtmEjournalEtl:
         logger.info("batch size      : %s", self.cfg.get_int("input.BATCH_SIZE"))
         logger.info("parquet path    : %s", self.cfg.path("parquet.PARQUET_PATH"))
         logger.info("tracking CSV    : %s", self.registry.csv_path)
-        logger.info("greenplum       : %s:%s/%s -> %s.%s",
-                    self.cfg.get("greenplum.GREENPLUM_HOST"),
-                    self.cfg.get("greenplum.GREENPLUM_PORT"),
-                    self.cfg.get("greenplum.GREENPLUM_DATABASE"),
+        logger.info("greenplum       : %s -> %s.%s (user=%s)",
+                    self.cfg.get("greenplum.GREENPLUM_URL"),
                     self.cfg.get("greenplum.GREENPLUM_SCHEMA"),
-                    self.cfg.get("greenplum.GREENPLUM_TABLE"))
+                    self.cfg.get("greenplum.GREENPLUM_TABLE"),
+                    self.cfg.get("greenplum.GREENPLUM_USER"))
         logger.info("load strategy   : %s", self.cfg.get("greenplum.GREENPLUM_LOAD_STRATEGY"))
         logger.info("dry run         : %s", self.dry_run)
         logger.debug("effective configuration (secrets masked): %s",
@@ -243,8 +240,7 @@ class AtmEjournalEtl:
     def _ensure_loader(self):
         if self.loader is None:
             from greenplum_loader import GreenplumLoader                      # noqa: PLC0415
-            self.loader = GreenplumLoader(self.cfg, spark=self.spark,
-                                          secret_resolver=self.secret_resolver)
+            self.loader = GreenplumLoader(self.cfg, spark=self.spark)
         elif self.loader.spark is None:
             self.loader.spark = self.spark
         return self.loader

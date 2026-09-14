@@ -184,8 +184,11 @@ def test_crash_after_greenplum_commit_is_recovered_without_reloading(etl_home, s
     assert os.listdir(os.path.join(etl_home, "processed", "pending")) == []
 
 
-def test_reprocessing_the_same_file_does_not_duplicate_rows(etl_home, spark):
-    """delete_insert_by_source_file keeps a forced re-run idempotent."""
+def test_append_strategy_reloads_a_file_whose_tracking_row_was_lost(etl_home, spark):
+    """
+    With GREENPLUM_LOAD_STRATEGY: append (the default) the write is a plain
+    JDBC append, so a file that loses its tracking row is loaded a second time.
+    """
     fixtures.build_input_tree(os.path.join(etl_home, "ATM_EJOURNALS"),
                               atms=1, files_per_atm=1, transactions=2)
     config_path = fixtures.write_config(etl_home, batch_size=1)
@@ -193,12 +196,28 @@ def test_reprocessing_the_same_file_does_not_duplicate_rows(etl_home, spark):
     _, loader = _run(config_path, "RUN1")
     assert len(loader.rows) == 2
 
-    # simulate a lost tracking CSV (operator error / restore from backup)
     os.remove(os.path.join(etl_home, "processed", "processed_files.csv"))
     summary, loader = _run(config_path, "RUN2", loader=loader)
 
     assert summary.files_processed == 1
-    assert len(loader.rows) == 2                                  # replaced, not appended
+    assert len(loader.rows) == 4                        # appended again
+
+
+def test_delete_insert_strategy_keeps_a_reload_idempotent(etl_home, spark):
+    """delete_insert_by_source_file replaces the file's rows instead."""
+    fixtures.build_input_tree(os.path.join(etl_home, "ATM_EJOURNALS"),
+                              atms=1, files_per_atm=1, transactions=2)
+    config_path = fixtures.write_config(etl_home, batch_size=1)
+    loader = fixtures.FakeGreenplumLoader(strategy="delete_insert_by_source_file")
+
+    _, loader = _run(config_path, "RUN1", loader=loader)
+    assert len(loader.rows) == 2
+
+    os.remove(os.path.join(etl_home, "processed", "processed_files.csv"))
+    summary, loader = _run(config_path, "RUN2", loader=loader)
+
+    assert summary.files_processed == 1
+    assert len(loader.rows) == 2                        # replaced, not appended
 
 
 # --------------------------------------------------------------------------- #

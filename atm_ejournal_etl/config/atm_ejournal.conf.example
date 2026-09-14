@@ -1,15 +1,16 @@
 # =============================================================================
 # EXAMPLE configuration - DUMMY VALUES ONLY, never use as-is in production.
-# Copy to config/atm_ejournal.conf and replace hosts, paths, users and the
-# encrypted passwords with the values for your environment.
+# Copy to config/atm_ejournal.conf, replace the url/user/password/driver, the
+# paths and the table names, and restrict the file (chmod 600) - the Greenplum
+# and SMTP passwords are stored in clear text.
 # =============================================================================
 # =============================================================================
 # ATM E-Journal ETL - central configuration
 # =============================================================================
 # YAML, same style as the existing spark/table configuration file.
 #
-#   * Passwords are stored in ENCRYPTED form only (Fernet token produced by the
-#     project encryptor). The pickle holding the key is referenced per section.
+#   * Credentials are plain values (url / user / password / driver). Restrict the
+#     file: chown to the ETL account and chmod 600.
 #   * ${VAR} / ${VAR:-default} are expanded from the process environment, so the
 #     same file works in DEV/UAT/PROD without code changes.
 #   * Every ETL lives under `etls:` - add a second key to run a second journal
@@ -26,24 +27,6 @@ project:
   BASE_DIR: "${ATM_ETL_HOME:-.}"
   ETL_NAME: "atm_ejournal"
   ENVIRONMENT: "${ATM_ETL_ENV:-UAT}"
-
-# --------------------------------------------------------------------------- #
-# Encryption / decryption (reuses the project encryptor + pickle key store).
-# --------------------------------------------------------------------------- #
-encryption:
-  # Python module that holds the existing encryptor implementation. It is
-  # imported from src/; drop the supplied encryptor file there and keep this
-  # name in sync. A comma separated list is tried in order.
-  MODULE: "encryptor,encryption,enc_util"
-  # Callable/attribute used to decrypt: <module>.<FACTORY>(pickle_path) or a
-  # module level function get_decrypt_data(value).
-  FACTORY: "Encryptor"
-  DECRYPT_METHOD: "get_decrypt_data"
-  ENCRYPT_METHOD: "get_encrypt_data"
-  PICKLE_PATH: "config/pickle/encryption.pkl"
-  # When the supplied encryptor module is not present, fall back to the
-  # equivalent built-in Fernet + pickle implementation (same token format).
-  ALLOW_BUILTIN_FALLBACK: true
 
 # --------------------------------------------------------------------------- #
 # Values shared by every ETL defined under `etls:`.
@@ -108,7 +91,7 @@ defaults:
   spark:
     SPARK_APP_NAME: "atm_ejournal_etl"
     SPARK_MASTER: "spark://spark-master.example.local:7077"
-    SPARK_JARS: "/opt/jars/postgresql-42.2.18.jar,/opt/jars/greenplum-connector-apache-spark-scala_2.12-2.2.0.jar"
+    SPARK_JARS: "/opt/jars/postgresql-42.2.18.jar"
     SPARK_EXECUTOR_INSTANCES: "8"
     SPARK_EXECUTOR_MEMORY: "10g"
     SPARK_EXECUTOR_CORES: "4"
@@ -128,35 +111,41 @@ defaults:
       spark.sql.files.ignoreCorruptFiles: "true"
 
   greenplum:
-    GREENPLUM_HOST: "greenplum.example.local"
-    GREENPLUM_PORT: 5432
-    GREENPLUM_DATABASE: "example_db"
+    # Connection - plain values, exactly what the Spark JDBC writer is given.
+    # Keep this file readable only by the ETL account (chmod 600): the password
+    # is stored in clear text.
+    GREENPLUM_URL: "jdbc:postgresql://greenplum.example.local:5432/example_db"
+    GREENPLUM_USER: "example_user"
+    GREENPLUM_PASSWORD: "example_password"
+    GREENPLUM_DRIVER: "org.postgresql.Driver"
+
+    # Target
     GREENPLUM_SCHEMA: "atm"
     GREENPLUM_TABLE: "atm_ejournal_withdrawals"
+    # Only used by the staged load strategies below.
     GREENPLUM_STAGING_TABLE: "atm_ejournal_withdrawals_stg"
     GREENPLUM_CONTROL_TABLE: "atm_ejournal_batch_control"
-    GREENPLUM_USER: "example_user"
-    # Encrypted with the project encryptor - never store a plaintext password.
-    # Produce the token with:  python3 src/encryption_util.py --config <this file>
-    GREENPLUM_PASSWORD: "REPLACE_WITH_ENCRYPTED_PASSWORD"
-    GREENPLUM_PICKLE: "config/pickle/encryption.pkl"
-    GREENPLUM_DRIVER: "org.postgresql.Driver"
-    # greenplum = greenplum-spark connector, jdbc = postgresql JDBC writer.
-    GREENPLUM_WRITE_FORMAT: "greenplum"
+
+    # How a batch is written:
+    #   append   (default) df.write.format("jdbc")...mode("append").save()
+    #   overwrite          the same write with mode("overwrite")
+    #   delete_insert_by_source_file | merge_by_key | truncate_load
+    #                      staging table first, then promoted in one transaction
+    GREENPLUM_LOAD_STRATEGY: "append"
+    GREENPLUM_WRITE_MODE: "append"
+    GREENPLUM_MERGE_KEYS: "ATM_NO,TRANSACTION_REF,TRANSACTION_DATETIME,AMOUNT"
+
     GREENPLUM_JDBC_BATCH_SIZE: 20000
     # Parallel writers into Greenplum (0 = leave the DataFrame as it is).
     GREENPLUM_WRITE_PARTITIONS: 8
-    # Idempotency strategy, see README "Greenplum loading":
-    #   delete_insert_by_source_file (default) | insert_only | merge_by_key |
-    #   truncate_load
-    GREENPLUM_LOAD_STRATEGY: "delete_insert_by_source_file"
-    GREENPLUM_MERGE_KEYS: "ATM_NO,TRANSACTION_REF,TRANSACTION_DATETIME,AMOUNT"
+    # Record every loaded batch in the control table. It is what a restart reads
+    # to tell a committed batch from one that never reached Greenplum.
+    GREENPLUM_USE_CONTROL_TABLE: true
+    GREENPLUM_CREATE_OBJECTS: true
     # Distribution keys used when the ETL creates the tables itself. Leave empty
     # on plain PostgreSQL (DISTRIBUTED BY is Greenplum only).
     GREENPLUM_TARGET_DISTRIBUTED_BY: "ATM_NO"
     GREENPLUM_CONTROL_DISTRIBUTED_BY: "batch_id"
-    GREENPLUM_CREATE_OBJECTS: true
-    GREENPLUM_QUERY_TIMEOUT_SECONDS: 3600
 
   parser:
     # Forwarded unchanged to atm_ejournal_parser.deduplicate_attempts().
@@ -172,9 +161,8 @@ defaults:
     SMTP_PORT: 25
     SMTP_USE_TLS: false
     SMTP_USER: ""
-    # Encrypted in the same way as the Greenplum password ("" = no auth).
+    # Plain value ("" = no SMTP authentication).
     SMTP_PASSWORD: ""
-    SMTP_PICKLE: "config/pickle/encryption.pkl"
     SMTP_TIMEOUT_SECONDS: 30
     MAIL_FROM: "atm-etl@example.com"
     MAIL_TO: "data-ops@example.com"

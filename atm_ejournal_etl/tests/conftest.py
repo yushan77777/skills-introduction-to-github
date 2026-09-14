@@ -71,13 +71,21 @@ def spark():
     pytest.importorskip("pyspark", reason="pyspark is not installed")
     from pyspark.sql import SparkSession
 
-    session = (SparkSession.builder
+    builder = (SparkSession.builder
                .master("local[2]")
                .appName("atm_ejournal_tests")
                .config("spark.driver.memory", "1g")
                .config("spark.ui.enabled", "false")
-               .config("spark.sql.shuffle.partitions", "2")
-               .getOrCreate())
+               .config("spark.sql.shuffle.partitions", "2"))
+
+    # The database integration tests need the JDBC driver on the classpath, both
+    # for the write and for the control connection borrowed from the JVM.
+    jdbc_jar = os.environ.get("ATM_ETL_TEST_JDBC_JAR")
+    if jdbc_jar:
+        builder = (builder.config("spark.jars", jdbc_jar)
+                          .config("spark.driver.extraClassPath", jdbc_jar))
+
+    session = builder.getOrCreate()
     session.sparkContext.setLogLevel("ERROR")
     return session
 

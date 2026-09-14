@@ -6,7 +6,6 @@
 pandas>=1.5            # existing parser (notebook / single-file debugging)
 openpyxl>=3.1          # existing Excel export
 PyYAML>=6.0            # configuration file
-cryptography>=41.0     # Fernet tokens (project encryptor + built-in fallback)
 pyspark>=3.4,<4.1      # match the cluster: Spark 4.0 -> pyspark==4.0.*
 psycopg2-binary>=2.9   # optional: control connection; the JDBC driver is used when absent
 pytest>=7.4            # tests

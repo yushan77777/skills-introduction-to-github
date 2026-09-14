@@ -6,9 +6,10 @@ parquet/*
 processed/*
 !processed/.gitkeep
 
-# Never commit the key store or a decrypted secret.
-config/pickle/*
-!config/pickle/.gitkeep
+# The live configuration holds the Greenplum/SMTP passwords in clear text.
+# Only the example (dummy values) is committed.
+config/*.conf
+!config/*.conf.example
 
 __pycache__/
 *.pyc

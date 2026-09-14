@@ -106,14 +106,6 @@ project:
   ETL_NAME: "atm_ejournal"
   ENVIRONMENT: "TEST"
 
-encryption:
-  MODULE: "encryptor_does_not_exist"
-  FACTORY: "Encryptor"
-  DECRYPT_METHOD: "get_decrypt_data"
-  ENCRYPT_METHOD: "get_encrypt_data"
-  PICKLE_PATH: "config/pickle/encryption.pkl"
-  ALLOW_BUILTIN_FALLBACK: true
-
 defaults:
   input:
     INPUT_PATH: "ATM_EJOURNALS"
@@ -166,26 +158,23 @@ defaults:
       spark.sql.session.timeZone: "UTC"
       spark.ui.enabled: "false"
   greenplum:
-    GREENPLUM_HOST: "localhost"
-    GREENPLUM_PORT: 5432
-    GREENPLUM_DATABASE: "testdb"
+    GREENPLUM_URL: "jdbc:postgresql://localhost:5432/testdb"
+    GREENPLUM_USER: "tester"
+    GREENPLUM_PASSWORD: "test-password"
+    GREENPLUM_DRIVER: "org.postgresql.Driver"
     GREENPLUM_SCHEMA: "atm"
     GREENPLUM_TABLE: "atm_ejournal_withdrawals"
     GREENPLUM_STAGING_TABLE: "atm_ejournal_withdrawals_stg"
     GREENPLUM_CONTROL_TABLE: "atm_ejournal_batch_control"
-    GREENPLUM_USER: "tester"
-    GREENPLUM_PASSWORD: ""
-    GREENPLUM_PICKLE: "config/pickle/encryption.pkl"
-    GREENPLUM_DRIVER: "org.postgresql.Driver"
-    GREENPLUM_WRITE_FORMAT: "jdbc"
+    GREENPLUM_LOAD_STRATEGY: "append"
+    GREENPLUM_WRITE_MODE: "append"
+    GREENPLUM_MERGE_KEYS: "ATM_NO,TRANSACTION_REF"
     GREENPLUM_JDBC_BATCH_SIZE: 1000
     GREENPLUM_WRITE_PARTITIONS: 1
-    GREENPLUM_LOAD_STRATEGY: "delete_insert_by_source_file"
-    GREENPLUM_MERGE_KEYS: "ATM_NO,TRANSACTION_REF"
+    GREENPLUM_USE_CONTROL_TABLE: true
+    GREENPLUM_CREATE_OBJECTS: true
     GREENPLUM_TARGET_DISTRIBUTED_BY: ""
     GREENPLUM_CONTROL_DISTRIBUTED_BY: ""
-    GREENPLUM_CREATE_OBJECTS: true
-    GREENPLUM_QUERY_TIMEOUT_SECONDS: 60
   parser:
     KEEP_LAST_FAILURE: true
     LINK_FAILED_ACROSS_AMOUNTS: false
@@ -198,7 +187,6 @@ defaults:
     SMTP_USE_TLS: false
     SMTP_USER: ""
     SMTP_PASSWORD: ""
-    SMTP_PICKLE: "config/pickle/encryption.pkl"
     SMTP_TIMEOUT_SECONDS: 5
     MAIL_FROM: "etl@example.com"
     MAIL_TO: "ops@example.com"
@@ -248,12 +236,15 @@ class FakeGreenplumLoader:
 
     Keeps the rows it was given in memory and mimics the batch control table, so
     the orchestration (ordering, tracking, recovery, cleanup) can be tested
-    without a database. ``fail_on`` makes a given batch raise, ``crash_after``
-    simulates the process dying *after* a successful commit.
+    without a database. ``strategy`` selects the write semantics it imitates
+    (``append`` or ``delete_insert_by_source_file``), ``fail_on`` makes a given
+    batch raise, and ``crash_after`` simulates the process dying *after* a
+    successful commit.
     """
 
-    def __init__(self, fail_on=None, crash_after=None):
+    def __init__(self, fail_on=None, crash_after=None, strategy="append"):
         self.spark = None
+        self.strategy = strategy
         self.rows: List[dict] = []
         self.control: Dict[str, int] = {}
         self.fail_on = set(fail_on or [])
@@ -269,9 +260,15 @@ class FakeGreenplumLoader:
             raise GreenplumLoadError(f"simulated Greenplum failure for {batch_id}")
 
         collected = [row.asDict() for row in dataframe.collect()]
-        # delete_insert_by_source_file semantics, so re-running a file is idempotent
-        keys = {row.get("SOURCE_FILE_KEY") for row in collected}
-        self.rows = [row for row in self.rows if row.get("SOURCE_FILE_KEY") not in keys]
+        if self.strategy == "delete_insert_by_source_file":
+            keys = {row.get("SOURCE_FILE_KEY") for row in collected}
+            self.rows = [row for row in self.rows if row.get("SOURCE_FILE_KEY") not in keys]
+        else:
+            # append, with the retry guard the loader applies: rows left by an
+            # earlier attempt of this exact run+batch are replaced, not doubled.
+            self.rows = [row for row in self.rows
+                         if not (row.get("ETL_RUN_ID") == run_id
+                                 and row.get("BATCH_ID") == batch_id)]
         self.rows.extend(collected)
         self.control[f"{run_id}|{batch_id}"] = len(collected)
 
@@ -279,8 +276,7 @@ class FakeGreenplumLoader:
             raise RuntimeError(f"simulated crash after the Greenplum commit for {batch_id}")
 
         return LoadResult(batch_id=batch_id, run_id=run_id, staged_rows=len(collected),
-                          rows_loaded=len(collected), committed=True,
-                          strategy="delete_insert_by_source_file")
+                          rows_loaded=len(collected), committed=True, strategy=self.strategy)
 
     def is_batch_committed(self, run_id, batch_id):
         return self.control.get(f"{run_id}|{batch_id}")

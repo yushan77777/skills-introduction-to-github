@@ -2,10 +2,8 @@
 E-mail notifications for the ATM E-Journal ETL.
 
 Used by the Airflow DAG (failure and success callbacks) and available to the ETL
-itself. All settings - host, port, TLS, sender, recipients, subjects - come from
-the ``mail:`` section of the configuration file; the SMTP password is stored
-encrypted and decrypted through the project encryptor, exactly like the
-Greenplum password.
+itself. All settings - host, port, TLS, sender, recipients, subjects and the SMTP
+password - come from the ``mail:`` section of the configuration file.
 
 Sending is best effort: a notification that cannot be delivered is logged, never
 raised into the caller, so a mail outage does not turn a successful ETL run into
@@ -26,7 +24,7 @@ logger = logging.getLogger("atm_ejournal.mail")
 class MailSender:
     """Thin SMTP wrapper around the ``mail:`` configuration section."""
 
-    def __init__(self, cfg, secret_resolver=None):
+    def __init__(self, cfg):
         self.cfg = cfg
         self.enabled = cfg.get_bool("mail.MAIL_ENABLED", True)
         self.host = str(cfg.get("mail.SMTP_HOST", "") or "")
@@ -37,18 +35,7 @@ class MailSender:
         self.mail_from = str(cfg.get("mail.MAIL_FROM", "") or "")
         self.mail_to = cfg.get_list("mail.MAIL_TO")
         self.mail_cc = cfg.get_list("mail.MAIL_CC")
-        self._secret_resolver = secret_resolver
-
-    # -- credentials -------------------------------------------------------- #
-
-    def _password(self) -> str:
-        if not self.user:
-            return ""
-        if self._secret_resolver is None:
-            from encryption_util import SecretResolver          # noqa: PLC0415
-            self._secret_resolver = SecretResolver.from_config(self.cfg)
-        return self._secret_resolver.resolve_config_secret(
-            self.cfg, "mail.SMTP_PASSWORD", "mail.SMTP_PICKLE")
+        self.password = str(cfg.get("mail.SMTP_PASSWORD", "") or "")
 
     # -- sending ------------------------------------------------------------ #
 
@@ -80,7 +67,7 @@ class MailSender:
                 if self.use_tls:
                     server.starttls()
                 if self.user:
-                    server.login(self.user, self._password())
+                    server.login(self.user, self.password)
                 server.send_message(message, to_addrs=recipients + copies)
             logger.info("notification sent to %s: %s", ", ".join(recipients), subject)
             return True

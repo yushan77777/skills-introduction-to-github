@@ -84,25 +84,19 @@ def test_smtp_failure_never_breaks_the_caller(cfg, fake_smtp, caplog):
     assert "notification could not be sent" in caplog.text
 
 
-def test_smtp_password_is_decrypted_through_the_project_mechanism(cfg, fake_smtp, tmp_path):
-    import pickle
+def test_smtp_password_comes_from_the_configuration(cfg, fake_smtp):
+    _enable_mail(cfg, SMTP_USER="etl_user", SMTP_USE_TLS=True, SMTP_PASSWORD="smtp-pass")
 
-    from cryptography.fernet import Fernet
-    from encryption_util import SecretResolver
-
-    key_path = tmp_path / "encryption.pkl"
-    key = Fernet.generate_key()
-    key_path.write_bytes(pickle.dumps(key))
-
-    _enable_mail(cfg, SMTP_USER="etl_user", SMTP_USE_TLS=True,
-                 SMTP_PASSWORD=Fernet(key).encrypt(b"smtp-pass").decode(),
-                 SMTP_PICKLE=str(key_path))
-    resolver = SecretResolver(modules=["not_installed"], default_pickle=str(key_path))
-
-    assert MailSender(cfg, secret_resolver=resolver).send("s", "b") is True
+    assert MailSender(cfg).send("s", "b") is True
     sent = fake_smtp.sent[0]
     assert sent["tls"] is True
     assert sent["login"] == ("etl_user", "smtp-pass")
+
+
+def test_no_login_without_a_user(cfg, fake_smtp):
+    _enable_mail(cfg, SMTP_USER="", SMTP_PASSWORD="")
+    assert MailSender(cfg).send("s", "b") is True
+    assert fake_smtp.sent[0]["login"] is None
 
 
 # --------------------------------------------------------------------------- #

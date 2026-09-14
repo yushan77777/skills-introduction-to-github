@@ -47,11 +47,10 @@ REQUIRED_KEYS = (
     "logging.LOG_PATH",
     "spark.SPARK_APP_NAME",
     "spark.SPARK_MASTER",
-    "greenplum.GREENPLUM_HOST",
-    "greenplum.GREENPLUM_DATABASE",
+    "greenplum.GREENPLUM_URL",
     "greenplum.GREENPLUM_SCHEMA",
     "greenplum.GREENPLUM_TABLE",
-    "greenplum.GREENPLUM_USER",
+    "greenplum.GREENPLUM_DRIVER",
 )
 
 #: Never written to a log line, an exception or the run summary.
@@ -209,7 +208,8 @@ class EtlConfig:
             raise ConfigError(f"[{self.etl_name}] logging.MAX_LOG_SIZE_GB must be > 0")
 
         strategy = str(self.get("greenplum.GREENPLUM_LOAD_STRATEGY", "")).lower()
-        allowed = {"delete_insert_by_source_file", "insert_only", "merge_by_key", "truncate_load"}
+        allowed = {"append", "overwrite", "delete_insert_by_source_file",
+                   "merge_by_key", "truncate_load"}
         if strategy not in allowed:
             raise ConfigError(f"[{self.etl_name}] greenplum.GREENPLUM_LOAD_STRATEGY must be one of "
                               + ", ".join(sorted(allowed)) + f", got {strategy!r}")
@@ -222,10 +222,15 @@ class EtlConfig:
             raise ConfigError(f"[{self.etl_name}] tracking.FILE_KEY_MODE must be one of "
                               "path, path_size, path_mtime")
 
-        write_format = str(self.get("greenplum.GREENPLUM_WRITE_FORMAT", "jdbc")).lower()
-        if write_format not in {"greenplum", "jdbc"}:
-            raise ConfigError(f"[{self.etl_name}] greenplum.GREENPLUM_WRITE_FORMAT must be "
-                              "'greenplum' or 'jdbc'")
+        write_mode = str(self.get("greenplum.GREENPLUM_WRITE_MODE", "append")).lower()
+        if write_mode not in {"append", "overwrite"}:
+            raise ConfigError(f"[{self.etl_name}] greenplum.GREENPLUM_WRITE_MODE must be "
+                              "'append' or 'overwrite'")
+
+        url = str(self.get("greenplum.GREENPLUM_URL", ""))
+        if not url.lower().startswith("jdbc:"):
+            raise ConfigError(f"[{self.etl_name}] greenplum.GREENPLUM_URL must be a JDBC URL, "
+                              "e.g. jdbc:postgresql://<host>:5432/<database>")
 
     def safe_dump(self) -> Dict[str, Any]:
         """The whole configuration with every credential masked - safe to log."""
@@ -305,10 +310,7 @@ def load_config(config_path: Optional[str] = None,
 
     defaults = raw.get("defaults") or {}
     profile = profiles.get(name) or {}
-    resolved: Dict[str, Any] = {
-        "project": copy.deepcopy(raw.get("project") or {}),
-        "encryption": copy.deepcopy(raw.get("encryption") or {}),
-    }
+    resolved: Dict[str, Any] = {"project": copy.deepcopy(raw.get("project") or {})}
     for section in MERGED_SECTIONS:
         merged = _deep_merge(defaults.get(section) or {}, profile.get(section) or {})
         if merged:

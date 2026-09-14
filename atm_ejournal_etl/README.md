@@ -18,8 +18,8 @@ Input files
 The parsing logic is unchanged: `src/atm_ejournal_parser.py` is the module that was
 already in use (grammar, retry collapsing, denominations, audit counters - see
 [`docs/PARSER_README.md`](docs/PARSER_README.md)). What is new is everything around it:
-batching, tracking, parquet staging, Greenplum loading, configuration, encryption,
-logging with retention, Airflow orchestration and notifications.
+batching, tracking, parquet staging, Greenplum loading, configuration, logging with
+retention, Airflow orchestration and notifications.
 
 ---
 
@@ -29,23 +29,21 @@ logging with retention, Airflow orchestration and notifications.
 | --- | --- |
 | `config/atm_ejournal.conf` | Central configuration (YAML). One section per concern, one profile per ETL |
 | `config/atm_ejournal.conf.example` | The same file with dummy values only |
-| `config/pickle/` | Encryption key store (`encryption.pkl`) - never committed |
 | `src/atm_ejournal_parser.py` | **Existing** parser, unchanged |
 | `src/config_loader.py` | Loads/validates a configuration profile |
-| `src/encryption_util.py` | Reuses the project encryptor to decrypt passwords (+ CLI to encrypt one) |
 | `src/log_manager.py` | Run log, per-batch logs, retention / size sweep |
 | `src/file_registry.py` | Discovery, batching, `processed_files.csv`, pending markers |
 | `src/spark_session.py` | SparkSession from the configuration |
 | `src/spark_parser.py` | Runs the existing parser on the executors, fixed output schema |
 | `src/parquet_stage.py` | Batch parquet write, validation, read-back, cleanup |
-| `src/greenplum_loader.py` | Staging -> target in one transaction + batch control table |
+| `src/greenplum_loader.py` | The Spark JDBC write + load strategies + batch control table |
 | `src/mail_util.py` | Success/failure e-mails |
 | `src/etl_runner.py` | The orchestrator (batch loop, recovery, run summary) |
 | `src/run_etl.py` | Command line entry point |
 | `dags/atm_ejournal_etl_dag.py` | Airflow DAG with failure/success e-mails |
 | `notebooks/run_atm_ejournal_etl.ipynb` | Manual run: dry run, batch limit, inspection |
 | `notebooks/run_atm_ejournal_parser.ipynb` | **Existing** parser notebook, unchanged. It imports the parser from the folder it runs in, so set `MODULE_DIR` in its first cell to `../src` |
-| `tests/` | Unit and integration tests (Greenplum, SMTP and Airflow mocked) |
+| `tests/` | Unit tests (SMTP and Airflow mocked) and an opt-in real-database suite |
 | `logs/`, `parquet/`, `processed/` | Runtime directories (created if missing) |
 
 ---
@@ -55,12 +53,12 @@ logging with retention, Airflow orchestration and notifications.
 ```bash
 pip install -r requirements.txt
 
-cp config/atm_ejournal.conf.example config/atm_ejournal.conf   # then edit it
+cp config/atm_ejournal.conf.example config/atm_ejournal.conf
+chmod 600 config/atm_ejournal.conf        # it holds the Greenplum/SMTP passwords
 export ATM_ETL_HOME=/etl/atm_ejournal
 
-# one-off: create the key store, then encrypt the Greenplum password
-python3 src/encryption_util.py --init-key
-python3 src/encryption_util.py            # prompts, prints the token for the conf file
+# edit config/atm_ejournal.conf: GREENPLUM_URL / USER / PASSWORD / DRIVER,
+# the schema + table, INPUT_PATH and the Spark settings
 
 # see what a run would do, without loading anything
 python3 src/run_etl.py --dry-run --max-batches 1
@@ -155,21 +153,21 @@ The shipped defaults are the cluster settings already in use (master URL, connec
 
 | Key | Meaning |
 | --- | --- |
-| `GREENPLUM_HOST` / `PORT` / `DATABASE` / `SCHEMA` / `TABLE` | Target |
-| `GREENPLUM_STAGING_TABLE` | Per-batch staging table (overwritten every batch) |
-| `GREENPLUM_CONTROL_TABLE` | Batch control table - the authority for restart decisions |
+| `GREENPLUM_URL` | JDBC URL, e.g. `jdbc:postgresql://<host>:5432/<database>` |
 | `GREENPLUM_USER` | Database user |
-| `GREENPLUM_PASSWORD` | **Encrypted** token, decrypted through the project encryptor |
-| `GREENPLUM_PICKLE` | Key store for that token |
-| `GREENPLUM_DRIVER` | JDBC driver class |
-| `GREENPLUM_WRITE_FORMAT` | `greenplum` (connector) or `jdbc` |
-| `GREENPLUM_JDBC_BATCH_SIZE` | JDBC `batchsize` |
-| `GREENPLUM_WRITE_PARTITIONS` | Parallel writers (`0` = leave the DataFrame as it is) |
-| `GREENPLUM_LOAD_STRATEGY` | `delete_insert_by_source_file` (default), `merge_by_key`, `insert_only`, `truncate_load` |
+| `GREENPLUM_PASSWORD` | Password, in clear text - keep the file `chmod 600` |
+| `GREENPLUM_DRIVER` | JDBC driver class, `org.postgresql.Driver` |
+| `GREENPLUM_SCHEMA` / `GREENPLUM_TABLE` | Target table; together they form the `dbtable` option |
+| `GREENPLUM_LOAD_STRATEGY` | `append` (default), `overwrite`, `delete_insert_by_source_file`, `merge_by_key`, `truncate_load` |
+| `GREENPLUM_WRITE_MODE` | `append` or `overwrite` - the `.mode(...)` of the write |
+| `GREENPLUM_STAGING_TABLE` | Staging table, used by the staged strategies only |
+| `GREENPLUM_CONTROL_TABLE` | Batch control table - what a restart reads |
+| `GREENPLUM_USE_CONTROL_TABLE` | Record each loaded batch there (default true) |
 | `GREENPLUM_MERGE_KEYS` | Key columns for `merge_by_key` |
+| `GREENPLUM_JDBC_BATCH_SIZE` | JDBC `batchsize` option |
+| `GREENPLUM_WRITE_PARTITIONS` | Parallel writers (`0` = leave the DataFrame as it is) |
+| `GREENPLUM_CREATE_OBJECTS` | Create the target/control tables when missing |
 | `GREENPLUM_TARGET_DISTRIBUTED_BY` / `..._CONTROL_DISTRIBUTED_BY` | `DISTRIBUTED BY` used when the ETL creates the tables (leave empty on plain PostgreSQL) |
-| `GREENPLUM_CREATE_OBJECTS` | Create the control/target tables when missing |
-| `GREENPLUM_QUERY_TIMEOUT_SECONDS` | Control statement timeout |
 
 ### `parser`
 
@@ -179,9 +177,9 @@ low-confidence blocks (`PARSE_CONFIDENT = false`) are loaded or dropped.
 
 ### `mail`
 
-`MAIL_ENABLED`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USE_TLS`, `SMTP_USER`, `SMTP_PASSWORD`
-(encrypted), `SMTP_PICKLE`, `SMTP_TIMEOUT_SECONDS`, `MAIL_FROM`, `MAIL_TO`, `MAIL_CC`,
-`MAIL_SUBJECT_SUCCESS`, `MAIL_SUBJECT_FAILURE`.
+`MAIL_ENABLED`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USE_TLS`, `SMTP_USER`, `SMTP_PASSWORD`,
+`SMTP_TIMEOUT_SECONDS`, `MAIL_FROM`, `MAIL_TO`, `MAIL_CC`, `MAIL_SUBJECT_SUCCESS`,
+`MAIL_SUBJECT_FAILURE`.
 
 ### `airflow`
 
@@ -217,9 +215,8 @@ No code changes: no path, table or batch size is hard-coded in Python.
 ```
 atm_ejournal_etl/
     config/
-        atm_ejournal.conf
+        atm_ejournal.conf              <- url/user/password/driver, chmod 600
         atm_ejournal.conf.example
-        pickle/encryption.pkl          <- key store (never committed)
     src/                               <- ETL modules + the existing parser
     dags/atm_ejournal_etl_dag.py
     notebooks/
@@ -302,35 +299,59 @@ those directories are swept by age at the start of later runs.
 
 ## How Greenplum loading works
 
+The write is the plain Spark JDBC write:
+
+```python
+df.write \
+    .format("jdbc") \
+    .option("url", "jdbc:postgresql://<host>:5432/<database>") \
+    .option("dbtable", "schema.table_name") \
+    .option("user", "username") \
+    .option("password", "password") \
+    .option("driver", "org.postgresql.Driver") \
+    .mode("append") \
+    .save()
 ```
-parquet/batch_0001 --Spark write--> atm.atm_ejournal_withdrawals_stg   (overwrite)
+
+`url`, `user`, `password`, `driver`, `schema` and `table` come straight from the
+`greenplum:` section; the DataFrame is the batch read back from its parquet, never the
+in-memory parse result.
+
+**Strategies.** `append` (default) and `overwrite` do exactly the write above against the
+target table. The staged strategies write the batch into `GREENPLUM_STAGING_TABLE` with
+`mode("overwrite")` first and then promote it inside one transaction:
+
+```
+parquet/batch_0001 --JDBC write--> atm.atm_ejournal_withdrawals_stg
                                             |
                           BEGIN             |
                             DELETE target rows for this batch's source files
                             INSERT INTO target SELECT * FROM staging
-                            INSERT INTO atm.atm_ejournal_batch_control (...)
                           COMMIT
 ```
 
-The promote and the control row commit together, so the target rows and the "this batch is
-loaded" marker can never disagree. The control table is what a restart consults.
+| Strategy | Re-loading the same file | Use it when |
+| --- | --- | --- |
+| `append` | rows are appended again | the feed is loaded once and duplicates are impossible or handled downstream |
+| `overwrite` | table is replaced | small table, full reload each run |
+| `delete_insert_by_source_file` | the file's previous rows are replaced | a journal file may be re-delivered or reprocessed |
+| `merge_by_key` | rows matching `GREENPLUM_MERGE_KEYS` are replaced | the table's grain is a business key |
+| `truncate_load` | table is truncated first | full reload with the staging validation |
 
-Control statements go through `psycopg2` when it is installed; otherwise the loader borrows
-the PostgreSQL JDBC driver already on the Spark classpath through the JVM, so no extra
-Python dependency is needed on the edge node.
+With `append`, a batch that is retried within the same run does not double: the loader
+first deletes rows carrying this `ETL_RUN_ID` + `BATCH_ID`. Across runs (for example a
+file whose tracking row was lost) `append` *will* load the file again - switch to
+`delete_insert_by_source_file` if that must not happen.
 
-**Idempotency.** The existing target is an append-style withdrawal table with no natural
-primary key (the same card can legitimately withdraw the same amount twice), so
-de-duplicating on business values would silently delete real transactions. The unit that
-*is* unambiguous is the source file: everything in a journal file is reproduced exactly by
-re-parsing it. Hence the default `delete_insert_by_source_file` - it removes what those
-files loaded before and inserts the new result, which makes any re-run (a retried batch, a
-restored tracking CSV, a manual reprocess) produce the same table content. Every row also
-carries `SOURCE_FILE_KEY`, `BATCH_ID`, `ETL_RUN_ID` and `LOAD_TS` for auditing.
+**Bookkeeping.** With `GREENPLUM_USE_CONTROL_TABLE` on (default) every loaded batch gets a
+row in the control table; that row is what a restart consults to tell a committed batch
+from one that never reached the database. With it off, the same question is answered by
+counting the batch's rows in the target table - every row carries `ETL_RUN_ID`,
+`BATCH_ID`, `SOURCE_FILE_KEY` and `LOAD_TS`.
 
-Choose another strategy when the table's grain differs: `merge_by_key` (delete by
-`GREENPLUM_MERGE_KEYS`), `truncate_load` (full reload), `insert_only` (plain append - no
-idempotency; only for a feed de-duplicated downstream).
+The control statements (DDL, promote, counts) go through `psycopg2` when it is installed;
+otherwise the loader borrows the PostgreSQL JDBC driver already on the Spark classpath
+through the JVM, so no extra Python dependency is needed on the edge node.
 
 Output schema: the columns produced by the parser, typed and stable
 (`ATM_NO`, `TRANSACTION_DATETIME`, `DATE`, `TIME`, `ACCOUNT_NO`, `CARD_NO`, `AMOUNT`,
@@ -341,8 +362,23 @@ Output schema: the columns produced by the parser, typed and stable
 The pandas version's dynamic `NOTES_<value>` columns cannot be part of a fixed table
 schema; the same information is carried by `DENOMINATION` (`5000x9 + 1000x3`) and
 `DENOM_BREAKDOWN` (JSON), from which per-note columns are derived in SQL when needed.
+`GREENPLUM_CREATE_OBJECTS` lets the ETL create the target and control tables from that
+schema on first use.
 
 ---
+
+## Credentials
+
+The configuration file holds the Greenplum and SMTP passwords in clear text, so:
+
+* `chown` it to the ETL account and `chmod 600` it;
+* keep it out of version control (the shipped `.gitignore` ignores `config/*.conf`);
+* or leave the values as `${GREENPLUM_PASSWORD}` and export them in the ETL account's
+  environment - `${VAR}` and `${VAR:-default}` are expanded when the file is read.
+
+Passwords are never written to a log line, an exception message or the run summary:
+`cfg.safe_dump()` masks every `*PASSWORD*`/`*SECRET*`/`*TOKEN*` key, and the loader logs
+the URL and user only.
 
 ## Logging and log retention
 
@@ -371,32 +407,6 @@ delete logs older than LOG_RETENTION_DAYS (365)
 
 The current run's log files are excluded from both passes, and a file that cannot be
 deleted is logged and counted rather than aborting the ETL.
-
----
-
-## Encryption
-
-The ETL reuses the encryptor already in the project:
-
-1. drop the encryptor file into `src/` and the key pickle into `config/pickle/`;
-2. point `encryption.MODULE` at the module name and `encryption.PICKLE_PATH` at the pickle
-   (per-secret overrides: `GREENPLUM_PICKLE`, `SMTP_PICKLE`);
-3. store only encrypted tokens in the configuration.
-
-Both shapes are supported: a class (`Encryptor(pickle_path).get_decrypt_data(token)`) and a
-module-level `get_decrypt_data(token)` function - the same call the existing Oracle job
-makes. If the module is absent, an equivalent built-in Fernet/pickle implementation is used
-(same token format, same key store) and a warning is logged; set
-`ALLOW_BUILTIN_FALLBACK: false` to make a missing encryptor a hard error instead.
-
-Decrypted values are never logged, never put into an exception message and never written to
-the run summary; `cfg.safe_dump()` masks every `*PASSWORD*`/`*SECRET*`/`*TOKEN*` key.
-
-Encrypt a value (it is prompted for, never taken from the command line):
-
-```bash
-python3 src/encryption_util.py --config config/atm_ejournal.conf
-```
 
 ---
 
@@ -435,8 +445,8 @@ The ETL is restartable; normally the recovery procedure is "run it again".
 | --- | --- | --- |
 | Spark session / parse | nothing marked, parquet partial | the batch's files are still unprocessed -> retried |
 | Parquet write or validation | parquet kept | same - retried; the kept parquet helps diagnose |
-| Greenplum load | transaction rolled back; no target rows, no control row; pending marker present | marker cleared, files retried, no duplicates |
-| Crash **after** the Greenplum commit, before the tracking update | target rows + control row exist; pending marker present | the control table is consulted: the batch is recognised as committed, the tracking CSV is completed **without reloading** |
+| Greenplum write | nothing marked as processed; pending marker present | the batch is recognised as not loaded, its files are retried |
+| Crash **after** the Greenplum write, before the tracking update | target rows (+ control row) exist; pending marker present | the control table - or the batch's rows in the target - is consulted: the batch is recognised as loaded and the tracking CSV is completed **without loading again** |
 | Tracking CSV update itself failed | as above | as above |
 | A single unreadable/corrupt file inside a batch | the rest of the batch loads | only that file stays unprocessed and is retried |
 | Airflow task failed | failure mail sent | Airflow retries per `AIRFLOW_RETRIES`; the next attempt resumes from the first unprocessed file |
@@ -473,26 +483,45 @@ tail -100 logs/atm_ejournal_etl_<run>.log
   Spark accumulators, so no extra action is needed to collect them.
 * **Processed-file lookup is a hash set** built in one pass, holding only file keys - not
   the whole CSV.
-* **Greenplum writes are bulk**: the connector (or JDBC with `batchsize`) writes the
-  staging table in parallel (`GREENPLUM_WRITE_PARTITIONS`); the promote is set-based SQL
-  inside the database, not row-by-row traffic from Spark.
+* **Greenplum writes are bulk**: the JDBC writer sends `GREENPLUM_JDBC_BATCH_SIZE` rows
+  per round trip from `GREENPLUM_WRITE_PARTITIONS` parallel writers; where a staged
+  strategy is used, the promote is set-based SQL inside the database, not row-by-row
+  traffic from Spark.
 
 ---
 
 ## Tests
 
 ```bash
-python3 -m pytest tests -q                 # everything
+python3 -m pytest tests -q                 # everything that needs no database
 python3 -m pytest tests -q -m "not spark"  # without a local SparkSession
 ```
 
-Greenplum, SMTP and Airflow are mocked; Spark and parquet are exercised for real on a
-local session. Covered: batch sizing (empty directory, one batch, many batches, batch size
-1, invalid batch size), tracking (first run, second run, mixed, duplicates, malformed rows,
-append-only), failure and restart (failed batch, crash after commit, forced reprocessing),
-parquet (write, validation, failed write, cleanup, keeping failed batches), logging
-(creation, one-year retention, 1 GB limit, oldest-first deletion, active-log protection,
-deletion errors), configuration (missing file, invalid YAML, missing/invalid values,
-profiles, masking), encryption (project encryptor reuse, missing pickle, invalid token, no
-secret ever logged), Greenplum SQL per strategy and rollback behaviour, the CLI, and the
-Airflow DAG (loads, wiring, retries, both e-mails).
+SMTP and Airflow are mocked; Spark and parquet are exercised for real on a local session,
+and the Greenplum path is exercised through a loader double that mimics the target and
+control tables. Covered: batch sizing (empty directory, one batch, many batches, batch
+size 1, invalid batch size), tracking (first run, second run, mixed, duplicates, malformed
+rows, append-only), failure and restart (failed batch, crash after the write, reload
+behaviour per strategy), parquet (write, validation, failed write, cleanup, keeping failed
+batches), logging (creation, one-year retention, 1 GB limit, oldest-first deletion,
+active-log protection, deletion errors), configuration (missing file, invalid YAML,
+missing/invalid values, profiles, masking), the JDBC write options and every load
+strategy, the CLI, and the Airflow DAG (loads, wiring, retries, both e-mails).
+
+### Against a real database
+
+`tests/test_greenplum_integration.py` runs the whole pipeline into a real PostgreSQL or
+Greenplum instance - no mock in the Greenplum path. It is skipped unless you point it at
+one:
+
+```bash
+export ATM_ETL_TEST_JDBC_URL="jdbc:postgresql://127.0.0.1:5432/bidb"
+export ATM_ETL_TEST_DB_USER="etl_user"
+export ATM_ETL_TEST_DB_PASSWORD="etl_password"
+export ATM_ETL_TEST_JDBC_JAR="/opt/jars/postgresql-42.7.4.jar"
+python3 -m pytest tests/test_greenplum_integration.py -q
+```
+
+It checks that the tables are created, that the JDBC write lands the parsed rows, that the
+control table is filled in, that a second run loads nothing, and that the staged strategy
+promotes through the staging table.
