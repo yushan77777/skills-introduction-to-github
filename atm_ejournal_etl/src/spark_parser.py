@@ -45,11 +45,15 @@ class SparkSerializationError(Exception):
     """
 
 
+#: Note values that get their own ``NOTES_<value>`` column (the bill-wise
+#: breakdown), overridable with ``parser.NOTE_DENOMINATIONS``.
+DEFAULT_NOTE_VALUES = (5000, 2000, 1000, 500, 100, 50, 20)
+
 #: The output schema, described once and built for both engines:
 #: :func:`build_schema` (Spark ``StructType``) and
 #: :func:`local_parser.arrow_schema` (PyArrow). Keeping one description means the
 #: parquet a batch produces is identical whichever engine wrote it.
-SCHEMA_FIELDS = [
+BASE_SCHEMA_FIELDS = [
     ("ATM_NO", "string"),
     ("TRANSACTION_DATETIME", "timestamp"),
     ("DATE", "date"),
@@ -98,7 +102,45 @@ SCHEMA_FIELDS = [
 ]
 
 
-def build_schema():
+def note_column(value: int) -> str:
+    """``5000`` -> ``NOTES_5000``."""
+    return f"NOTES_{int(value)}"
+
+
+def normalise_note_values(note_values=None) -> List[int]:
+    """Clean, de-duplicate and sort a configured note list (highest first)."""
+    if note_values is None:
+        return list(DEFAULT_NOTE_VALUES)
+    values = []
+    for value in note_values:
+        try:
+            number = int(str(value).strip())
+        except (TypeError, ValueError):
+            continue
+        if number > 0 and number not in values:
+            values.append(number)
+    return sorted(values, reverse=True) or list(DEFAULT_NOTE_VALUES)
+
+
+def schema_fields(note_values=None) -> List[Tuple[str, str]]:
+    """
+    The full field list: the base columns, then one ``NOTES_<value>`` column per
+    configured note plus ``NOTES_OTHER`` for anything the ATM dispensed that is
+    not in the list - so a denomination is never silently dropped.
+    """
+    values = normalise_note_values(note_values)
+    notes = [(note_column(value), "int") for value in values] + [("NOTES_OTHER", "int")]
+    # inserted right after DENOM_AMOUNT, where the pandas parser put them
+    anchor = [name for name, _ in BASE_SCHEMA_FIELDS].index("DENOM_MATCHES_AMOUNT")
+    return BASE_SCHEMA_FIELDS[:anchor] + notes + BASE_SCHEMA_FIELDS[anchor:]
+
+
+#: Field list with the default note values - what the module level
+#: ``COLUMN_ORDER`` describes.
+SCHEMA_FIELDS = schema_fields()
+
+
+def build_schema(note_values=None):
     """The output schema as a Spark ``StructType`` (deferred pyspark import)."""
     from pyspark.sql.types import (BooleanType, DateType, DoubleType, IntegerType,
                                    LongType, StringType, StructField, StructType,
@@ -114,11 +156,16 @@ def build_schema():
         "timestamp": TimestampType(),
     }
     return StructType([StructField(name, spark_types[kind], True)
-                       for name, kind in SCHEMA_FIELDS])
+                       for name, kind in schema_fields(note_values)])
 
 
-#: Column order of the rows produced by :func:`parse_journal_file`.
-COLUMN_ORDER = [name for name, _kind in SCHEMA_FIELDS]
+def column_order(note_values=None) -> List[str]:
+    """Column order of the rows produced by :func:`parse_journal_file`."""
+    return [name for name, _kind in schema_fields(note_values)]
+
+
+#: Column order with the default note values.
+COLUMN_ORDER = column_order()
 
 #: Parser counters aggregated across the batch (subset of ParseStats).
 STAT_KEYS = (
@@ -152,13 +199,49 @@ def _as_float(value: Any) -> Optional[float]:
         return None
 
 
+def breakdown_counts(breakdown: Any, note_values: List[int]) -> Dict[Any, Optional[int]]:
+    """
+    ``{5000: 9, 1000: 3}`` -> ``{5000: 9, 1000: 3, 500: 0, ..., "OTHER": 0}``.
+
+    ``None`` for every bucket when the record has no breakdown at all (a failed
+    withdrawal dispensed nothing), so "no notes" stays distinguishable from
+    "zero notes of this value".
+    """
+    if not isinstance(breakdown, dict) or not breakdown:
+        return {value: None for value in note_values} | {"OTHER": None}
+
+    counts: Dict[Any, Optional[int]] = {value: 0 for value in note_values}
+    other = 0
+    for raw_value, raw_count in breakdown.items():
+        try:
+            value, count = int(raw_value), int(raw_count)
+        except (TypeError, ValueError):
+            continue
+        if value in counts:
+            counts[value] = (counts[value] or 0) + count
+        else:
+            other += count
+    counts["OTHER"] = other
+    return counts
+
+
 def record_to_row(record: Dict[str, Any],
                   file_key: str,
                   batch_id: str,
                   run_id: str,
                   etl_name: str,
-                  load_ts: datetime) -> Tuple:
-    """Map one parser record onto :data:`COLUMN_ORDER`."""
+                  load_ts: datetime,
+                  note_values=None) -> Tuple:
+    """
+    Map one parser record onto the column order.
+
+    ``DENOM_BREAKDOWN`` (``{5000: 9, 1000: 3}``) becomes both the JSON column and
+    one count per configured note value - the bill-wise breakdown the pandas
+    parser produced as ``NOTES_5000``, ``NOTES_1000``, ... Notes outside the
+    configured list are summed into ``NOTES_OTHER``.
+    """
+    values = normalise_note_values(note_values)
+    counts = breakdown_counts(record.get("DENOM_BREAKDOWN"), values)
     transaction_dt = record.get("TRANSACTION_DATETIME")
     breakdown = record.get("DENOM_BREAKDOWN")
     amount = _as_float(record.get("AMOUNT"))
@@ -194,6 +277,8 @@ def record_to_row(record: Dict[str, Any],
         if isinstance(breakdown, dict) and breakdown else None,
         _as_int(record.get("NOTES_COUNT")),
         denom_amount,
+        *(counts[value] for value in values),
+        counts["OTHER"],
         matches,
         record.get("PLANNED_DENOMINATION"),
         record.get("MIX_NUMBER"),
@@ -254,7 +339,7 @@ def parse_journal_file(path: str,
 
         load_ts = options["load_ts"]
         rows = [record_to_row(record, file_key, options["batch_id"], options["run_id"],
-                              options["etl_name"], load_ts)
+                              options["etl_name"], load_ts, options.get("note_values"))
                 for record in kept]
         stats.files_processed += 1
         return rows, {key: getattr(stats, key, 0) for key in STAT_KEYS}, None
@@ -370,6 +455,8 @@ def build_batch_dataframe(spark, files, cfg, batch_id: str, run_id: str,
         "run_id": run_id,
         "etl_name": cfg.etl_name,
         "load_ts": datetime.now(),
+        "note_values": normalise_note_values(cfg.get_list("parser.NOTE_DENOMINATIONS")
+                                             or None),
     }
 
     key_mode = str(cfg.get("tracking.FILE_KEY_MODE", "path"))
@@ -382,7 +469,7 @@ def build_batch_dataframe(spark, files, cfg, batch_id: str, run_id: str,
            .mapPartitions(make_partition_parser(options, stats_accumulator, failure_accumulator)))
 
     try:
-        dataframe = spark.createDataFrame(rdd, schema=build_schema())
+        dataframe = spark.createDataFrame(rdd, schema=build_schema(options["note_values"]))
     except Exception as exc:                           # noqa: BLE001 - diagnosed, then re-raised
         from check_environment import describe_serialization_failure, is_serialization_failure
 

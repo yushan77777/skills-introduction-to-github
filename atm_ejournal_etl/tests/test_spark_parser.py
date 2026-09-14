@@ -114,6 +114,73 @@ def test_schema_matches_the_column_order():
     assert [field.name for field in build_schema().fields] == COLUMN_ORDER
 
 
+# --------------------------------------------------------------------------- #
+# Bill-wise breakdown: one column per note value
+# --------------------------------------------------------------------------- #
+
+
+def test_note_columns_are_in_the_schema():
+    from spark_parser import DEFAULT_NOTE_VALUES, build_schema, column_order
+
+    names = column_order()
+    for value in DEFAULT_NOTE_VALUES:
+        assert f"NOTES_{value}" in names
+    assert "NOTES_OTHER" in names
+    assert names.index("NOTES_5000") > names.index("DENOM_AMOUNT")
+    assert names.index("NOTES_OTHER") < names.index("DENOM_MATCHES_AMOUNT")
+    types = {field.name: type(field.dataType).__name__ for field in build_schema().fields}
+    assert types["NOTES_5000"] == "IntegerType"
+
+
+def test_note_columns_are_configurable():
+    from spark_parser import column_order
+
+    names = column_order(["1000", "500", "100"])
+    # NOTES_COUNT is the total, not a per-note column
+    notes = [name for name in names if name.startswith("NOTES_") and name != "NOTES_COUNT"]
+    assert notes == ["NOTES_1000", "NOTES_500", "NOTES_100", "NOTES_OTHER"]
+
+
+def test_the_breakdown_is_split_into_the_columns():
+    record = {
+        "ATM_NO": "ATM001", "STATUS": "SUCCESS", "AMOUNT": 23000.0,
+        "TRANSACTION_DATETIME": datetime(2026, 9, 10, 6, 42, 30),
+        "DENOM_BREAKDOWN": {5000: 4, 1000: 3}, "NOTES_COUNT": 7, "DENOM_AMOUNT": 23000.0,
+        "DENOMINATION": "5000x4 + 1000x3",
+    }
+    mapped = dict(zip(COLUMN_ORDER, record_to_row(record, "k", "B", "R", "etl",
+                                                  datetime(2026, 9, 14))))
+
+    assert mapped["NOTES_5000"] == 4
+    assert mapped["NOTES_1000"] == 3
+    assert mapped["NOTES_500"] == 0
+    assert mapped["NOTES_OTHER"] == 0
+    assert mapped["NOTES_COUNT"] == 7
+    assert mapped["DENOMINATION"] == "5000x4 + 1000x3"
+
+
+def test_an_unlisted_note_value_goes_to_notes_other():
+    from spark_parser import column_order
+
+    record = {"DENOM_BREAKDOWN": {5000: 2, 200: 5}, "STATUS": "SUCCESS"}
+    names = column_order()
+    mapped = dict(zip(names, record_to_row(record, "k", "B", "R", "etl",
+                                           datetime(2026, 9, 14))))
+
+    assert mapped["NOTES_5000"] == 2
+    assert mapped["NOTES_OTHER"] == 5                   # 200 is not in the default list
+
+
+def test_a_withdrawal_without_notes_leaves_the_columns_empty():
+    """A failed withdrawal dispensed nothing - that is not 'zero notes of each'."""
+    record = {"STATUS": "FAILED", "DENOM_BREAKDOWN": None}
+    mapped = dict(zip(COLUMN_ORDER, record_to_row(record, "k", "B", "R", "etl",
+                                                  datetime(2026, 9, 14))))
+
+    assert mapped["NOTES_5000"] is None
+    assert mapped["NOTES_OTHER"] is None
+
+
 def test_low_confidence_records_can_be_excluded(tmp_path):
     """A withdrawal block with no amount and no outcome is PARSE_CONFIDENT = false."""
     path = str(tmp_path / "EJ_PARTIAL.TXT")

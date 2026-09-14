@@ -187,6 +187,7 @@ The shipped defaults are the cluster settings already in use (master URL, connec
 | `PARSE_WRITE_CHUNK_RECORDS` | Local engine: records buffered before a parquet row group is written |
 | `KEEP_LAST_FAILURE`, `LINK_FAILED_ACROSS_AMOUNTS`, `RETRY_WINDOW_SECONDS` | Passed straight to the existing `deduplicate_attempts()` |
 | `KEEP_UNPARSED_RECORDS` | Load low-confidence blocks (`PARSE_CONFIDENT = false`) or drop them |
+| `NOTE_DENOMINATIONS` | Note values that get their own `NOTES_<value>` column, e.g. `5000,2000,1000,500,100,50,20` |
 
 ### `mail`
 
@@ -475,6 +476,31 @@ counting the batch's rows in the target table - every row carries `ETL_RUN_ID`,
 The control statements (DDL, promote, counts) go through `psycopg2` when it is installed;
 otherwise the loader borrows the PostgreSQL JDBC driver already on the Spark classpath
 through the JVM, so no extra Python dependency is needed on the edge node.
+
+### Bill-wise breakdown
+
+Each row carries the note counts the dispenser actually paid out, as columns:
+
+| `AMOUNT` | `DENOMINATION` | `NOTES_COUNT` | `NOTES_5000` | `NOTES_1000` | `NOTES_500` | `NOTES_OTHER` |
+| --- | --- | --- | --- | --- | --- | --- |
+| 23000 | `5000x4 + 1000x3` | 7 | 4 | 3 | 0 | 0 |
+| 10500 | `5000x2 + 500x1` | 3 | 2 | 0 | 1 | 0 |
+
+One column per value in `parser.NOTE_DENOMINATIONS`, plus `NOTES_OTHER` for anything
+dispensed that is not in that list, so a denomination is never silently dropped.
+`DENOM_BREAKDOWN` keeps the complete breakdown as JSON, and `DENOMINATION` the readable
+form. A failed withdrawal dispensed nothing, so its note columns are `NULL` rather than
+zero.
+
+Changing `NOTE_DENOMINATIONS` changes the table columns. The ETL adds columns a batch has
+and the target table does not (purely additive - nothing is dropped, renamed or retyped),
+so an existing table keeps working; it is logged as
+`added N missing column(s) to "atm"."atm_ejournal_withdrawals": ...`. Set
+`GREENPLUM_CREATE_OBJECTS: false` if DDL must come from a DBA, and apply it by hand:
+
+```sql
+ALTER TABLE atm.atm_ejournal_withdrawals ADD COLUMN "NOTES_5000" integer;
+```
 
 Output schema: the columns produced by the parser, typed and stable
 (`ATM_NO`, `TRANSACTION_DATETIME`, `DATE`, `TIME`, `ACCOUNT_NO`, `CARD_NO`, `AMOUNT`,

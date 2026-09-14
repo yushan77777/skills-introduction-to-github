@@ -391,3 +391,49 @@ def test_connector_failures_name_the_format(cfg):
 
     with pytest.raises(GreenplumLoadError, match="greenplum write into"):
         instance.write_dataframe(Exploding(), instance.table)
+
+
+# --------------------------------------------------------------------------- #
+# Additive column alignment
+# --------------------------------------------------------------------------- #
+
+
+class ColumnConnection(RecordingConnection):
+    """A control connection that reports a fixed set of existing columns."""
+
+    def __init__(self, columns):
+        super().__init__()
+        self.flavour = "psycopg2"
+        self.columns = list(columns)
+
+    def existing(self):
+        return self.columns
+
+
+def test_missing_columns_are_added(loader, monkeypatch):
+    connection = ColumnConnection(["ATM_NO", "AMOUNT"])
+    monkeypatch.setattr(loader, "existing_columns", lambda conn, table: connection.existing())
+
+    added = loader.align_table_columns(connection, FakeDataFrame().schema, loader.table)
+
+    assert added == ["SOURCE_FILE_KEY", "BATCH_ID", "ETL_RUN_ID"]
+    statements = " | ".join(connection.statements)
+    assert 'ALTER TABLE "atm"."atm_ejournal_withdrawals" ADD COLUMN "BATCH_ID" text' in statements
+    assert "DROP" not in statements                     # additive only
+
+
+def test_nothing_is_added_when_the_table_matches(loader, monkeypatch):
+    columns = [field.name for field in FakeDataFrame().schema.fields]
+    connection = ColumnConnection(columns)
+    monkeypatch.setattr(loader, "existing_columns", lambda conn, table: columns)
+
+    assert loader.align_table_columns(connection, FakeDataFrame().schema, loader.table) == []
+    assert connection.statements == []
+
+
+def test_a_missing_table_is_left_to_the_create(loader, monkeypatch):
+    connection = ColumnConnection([])
+    monkeypatch.setattr(loader, "existing_columns", lambda conn, table: [])
+
+    assert loader.align_table_columns(connection, FakeDataFrame().schema, loader.table) == []
+    assert connection.statements == []

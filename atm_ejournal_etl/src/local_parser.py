@@ -44,7 +44,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
-from spark_parser import COLUMN_ORDER, SCHEMA_FIELDS, STAT_KEYS, parse_journal_file
+from spark_parser import (STAT_KEYS, column_order, normalise_note_values,
+                          parse_journal_file, schema_fields)
 
 logger = logging.getLogger("atm_ejournal.local_parse")
 
@@ -76,7 +77,7 @@ class LocalParseResult:
 # --------------------------------------------------------------------------- #
 
 
-def arrow_schema():
+def arrow_schema(note_values=None):
     """The output schema as a PyArrow schema, built from the same description."""
     import pyarrow as pa                                # noqa: PLC0415
 
@@ -91,7 +92,7 @@ def arrow_schema():
         "timestamp": pa.timestamp("us"),
     }
     return pa.schema([pa.field(name, arrow_types[kind], nullable=True)
-                      for name, kind in SCHEMA_FIELDS])
+                      for name, kind in schema_fields(note_values)])
 
 
 def require_pyarrow():
@@ -155,6 +156,8 @@ def build_options(cfg, batch_id: str, run_id: str) -> Dict[str, Any]:
         "run_id": run_id,
         "etl_name": cfg.etl_name,
         "load_ts": datetime.now(),
+        "note_values": normalise_note_values(cfg.get_list("parser.NOTE_DENOMINATIONS")
+                                             or None),
     }
 
 
@@ -175,7 +178,7 @@ def _rows_to_arrow_table(rows: List[Tuple], schema):
     """Columnar conversion of a chunk of rows (no pandas dependency)."""
     import pyarrow as pa                                # noqa: PLC0415
 
-    columns = [[row[index] for row in rows] for index in range(len(COLUMN_ORDER))]
+    columns = [[row[index] for row in rows] for index in range(len(schema))]
     return pa.Table.from_arrays(
         [pa.array(column, type=schema.field(index).type)
          for index, column in enumerate(columns)],
@@ -202,7 +205,7 @@ def write_batch_parquet(files: Iterable[Any], cfg, batch_id: str, run_id: str,
     compression = str(cfg.get("parquet.PARQUET_COMPRESSION", "snappy"))
 
     tasks = [(item.path, item.atm_no, item.key(key_mode), options) for item in files]
-    schema = arrow_schema()
+    schema = arrow_schema(options["note_values"])
     result = LocalParseResult(parquet_path=parquet_path, file_count=len(files),
                               stats={key: 0 for key in STAT_KEYS})
     started = time.time()

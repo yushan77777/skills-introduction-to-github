@@ -378,7 +378,8 @@ class GreenplumLoader:
             if self.use_control_table:
                 connection.execute(self._control_table_ddl())
             if schema is not None:
-                connection.execute(self._target_table_ddl())
+                connection.execute(self._target_table_ddl(schema))
+                self.align_table_columns(connection, schema, self.table)
             connection.commit()
             self._objects_ready = True
             logger.info("Greenplum objects verified | target=%s | control=%s",
@@ -420,6 +421,54 @@ class GreenplumLoader:
                         if self.target_distributed_by else "")
         return (f"CREATE TABLE IF NOT EXISTS {self.target_table} ("
                 + ", ".join(columns) + f"){distribution}")
+
+    def existing_columns(self, connection: ControlConnection, table: str) -> List[str]:
+        """Column names of a table, in order, or ``[]`` when it does not exist."""
+        statement = (
+            "SELECT column_name FROM information_schema.columns "
+            f"WHERE table_schema = {sql_literal(self.schema)} "
+            f"AND table_name = {sql_literal(table)} ORDER BY ordinal_position")
+        if connection.flavour == "psycopg2":
+            with connection._connection.cursor() as cursor:            # noqa: SLF001
+                cursor.execute(statement)
+                return [row[0] for row in cursor.fetchall()]
+        sql_statement = connection._connection.createStatement()       # noqa: SLF001
+        try:
+            results = sql_statement.executeQuery(statement)
+            names = []
+            while results.next():
+                names.append(results.getString(1))
+            results.close()
+            return names
+        finally:
+            sql_statement.close()
+
+    def align_table_columns(self, connection: ControlConnection, schema,
+                            table: str) -> List[str]:
+        """
+        Add the columns the batch has and the table does not.
+
+        Purely additive - nothing is dropped, renamed or retyped - so a table
+        loaded by an earlier version (before the bill-wise NOTES_<value> columns,
+        say) accepts the new batches instead of failing the insert. Returns the
+        column names that were added.
+        """
+        existing = self.existing_columns(connection, table)
+        if not existing:
+            return []                                   # the CREATE above made it
+        present = set(existing)
+        added = []
+        for field_ in schema.fields:
+            if field_.name in present:
+                continue
+            column_type = TYPE_MAP.get(type(field_.dataType).__name__, "text")
+            connection.execute(f"ALTER TABLE {self.qualified(table)} "
+                               f"ADD COLUMN {quote_identifier(field_.name)} {column_type}")
+            added.append(field_.name)
+        if added:
+            logger.warning("added %d missing column(s) to %s: %s",
+                           len(added), self.qualified(table), ", ".join(added))
+        return added
 
     # -- staged strategies --------------------------------------------------- #
 

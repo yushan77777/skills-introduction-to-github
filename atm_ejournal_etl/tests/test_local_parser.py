@@ -18,7 +18,7 @@ import fixtures
 from file_registry import discover_files
 from local_parser import (LocalParseError, arrow_schema, build_options, count_parquet_rows,
                           parse_one, resolve_workers, write_batch_parquet)
-from spark_parser import COLUMN_ORDER, SCHEMA_FIELDS
+from spark_parser import COLUMN_ORDER, SCHEMA_FIELDS, column_order
 
 pyarrow = pytest.importorskip("pyarrow", reason="pyarrow is not installed")
 import pyarrow.parquet as parquet_reader                              # noqa: E402
@@ -91,6 +91,10 @@ def test_writes_a_spark_shaped_parquet_directory(local_cfg, etl_home, tmp_path):
     assert row["BATCH_ID"] == "BATCH_0001"
     assert row["ETL_RUN_ID"] == "RUN1"
     assert json.loads(row["DENOM_BREAKDOWN"]) == {"5000": 10}
+    # the bill-wise breakdown, one column per note value
+    assert row["NOTES_5000"] == 10
+    assert row["NOTES_1000"] == 0
+    assert row["NOTES_OTHER"] == 0
 
 
 def test_chunked_writing_keeps_memory_bounded(local_cfg, etl_home, tmp_path):
@@ -215,3 +219,16 @@ def test_missing_pyarrow_is_reported_with_the_remedy(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", refuse)
     with pytest.raises(LocalParseError, match="pip install pyarrow"):
         local_parser.require_pyarrow()
+
+
+def test_the_note_columns_follow_the_configuration(local_cfg, etl_home, tmp_path):
+    local_cfg._data["parser"]["NOTE_DENOMINATIONS"] = "5000,1000"        # noqa: SLF001
+    files = _files(os.path.join(etl_home, "ATM_EJOURNALS"))
+
+    write_batch_parquet(files, local_cfg, "B", "R", str(tmp_path / "notes"))
+
+    names = parquet_reader.read_table(str(tmp_path / "notes")).schema.names
+    assert [name for name in names
+            if name.startswith("NOTES_") and name != "NOTES_COUNT"] == \
+        ["NOTES_5000", "NOTES_1000", "NOTES_OTHER"]
+    assert names == column_order(["5000", "1000"])

@@ -198,3 +198,60 @@ def test_local_engine_loads_into_the_database(etl_home, real_table, spark):
     # the parquet PyArrow wrote is readable by Spark with the expected types
     assert _sql(loader, f'SELECT COUNT(*) FROM "{DB_SCHEMA}"."{table}" '
                         'WHERE "TRANSACTION_DATETIME" IS NOT NULL AND "DATE" IS NOT NULL') == 4
+
+
+def test_bill_wise_columns_land_in_the_table(etl_home, real_table, spark):
+    """One NOTES_<value> column per note value, filled from the dispenser's table."""
+    pytest.importorskip("pyarrow", reason="pyarrow is not installed")
+    table, _config_path, loader = real_table
+    config_path = _configure(etl_home, batch_size=5, strategy="append", table=table,
+                             parse_engine="local")
+    root = os.path.join(etl_home, "ATM_EJOURNALS")
+    fixtures.write_journal(os.path.join(root, "ATM001", "EJ1.TXT"),
+                           transactions=1, amount=23000, denomination={5000: 4, 1000: 3})
+    fixtures.write_journal(os.path.join(root, "ATM002", "EJ2.TXT"),
+                           transactions=1, amount=10500, denomination={5000: 2, 500: 1})
+
+    summary = AtmEjournalEtl(load_config(config_path, "atm_ejournal"), run_id="NOTES1").run()
+
+    assert summary.status == "SUCCESS"
+    assert _sql(loader, f'SELECT SUM("NOTES_5000") FROM "{DB_SCHEMA}"."{table}"') == 6
+    assert _sql(loader, f'SELECT SUM("NOTES_1000") FROM "{DB_SCHEMA}"."{table}"') == 3
+    assert _sql(loader, f'SELECT SUM("NOTES_500") FROM "{DB_SCHEMA}"."{table}"') == 1
+    assert _sql(loader, f'SELECT SUM("NOTES_OTHER") FROM "{DB_SCHEMA}"."{table}"') == 0
+    assert _sql(loader, f'SELECT SUM("NOTES_COUNT") FROM "{DB_SCHEMA}"."{table}"') == 10
+    # the note columns and the amount agree
+    assert _sql(loader, f'SELECT COUNT(*) FROM "{DB_SCHEMA}"."{table}" WHERE '
+                        '"NOTES_5000" * 5000 + "NOTES_1000" * 1000 + "NOTES_500" * 500 '
+                        '<> "AMOUNT"') == 0
+
+
+def test_an_older_table_gains_the_new_columns(etl_home, real_table, spark):
+    """
+    A table created before the bill-wise columns existed must not break the load:
+    the missing columns are added, nothing is dropped or retyped.
+    """
+    pytest.importorskip("pyarrow", reason="pyarrow is not installed")
+    table, _config_path, loader = real_table
+    config_path = _configure(etl_home, batch_size=5, strategy="append", table=table,
+                             parse_engine="local")
+
+    connection = loader.connect()
+    try:
+        connection.execute(f'CREATE TABLE "{DB_SCHEMA}"."{table}" '
+                           '("ATM_NO" text, "AMOUNT" numeric(20,2), "STATUS" text, '
+                           '"SOURCE_FILE_KEY" text, "BATCH_ID" text, "ETL_RUN_ID" text)')
+        connection.commit()
+    finally:
+        connection.close()
+
+    fixtures.build_input_tree(os.path.join(etl_home, "ATM_EJOURNALS"),
+                              atms=1, files_per_atm=1, transactions=2)
+    summary = AtmEjournalEtl(load_config(config_path, "atm_ejournal"), run_id="MIGRATE1").run()
+
+    assert summary.status == "SUCCESS"
+    assert _sql(loader, f'SELECT COUNT(*) FROM "{DB_SCHEMA}"."{table}"') == 2
+    assert _sql(loader, f'SELECT SUM("NOTES_5000") FROM "{DB_SCHEMA}"."{table}"') == 20
+    assert _sql(loader, "SELECT COUNT(*) FROM information_schema.columns WHERE "
+                        f"table_schema = '{DB_SCHEMA}' AND table_name = '{table}' "
+                        "AND column_name = 'ATM_NO'") == 1        # the old column survived
