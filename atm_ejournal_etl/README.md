@@ -31,6 +31,7 @@ retention, Airflow orchestration and notifications.
 | `config/atm_ejournal.conf.example` | The same file with dummy values only |
 | `src/atm_ejournal_parser.py` | **Existing** parser, unchanged |
 | `src/config_loader.py` | Loads/validates a configuration profile |
+| `src/check_environment.py` | Preflight: can this Python/PySpark ship code to the executors? |
 | `src/log_manager.py` | Run log, per-batch logs, retention / size sweep |
 | `src/file_registry.py` | Discovery, batching, `processed_files.csv`, pending markers |
 | `src/spark_session.py` | SparkSession from the configuration |
@@ -59,6 +60,9 @@ export ATM_ETL_HOME=/etl/atm_ejournal
 
 # edit config/atm_ejournal.conf: GREENPLUM_URL / USER / PASSWORD / DRIVER,
 # the schema + table, INPUT_PATH and the Spark settings
+
+# confirm this Python/PySpark installation can ship code to the executors
+python3 src/check_environment.py
 
 # see what a run would do, without loading anything
 python3 src/run_etl.py --dry-run --max-batches 1
@@ -490,6 +494,55 @@ tail -100 logs/atm_ejournal_etl_<run>.log
 
 ---
 
+## Troubleshooting
+
+### `PicklingError: Could not serialize object: IndexError: tuple index out of range`
+
+The driver cannot serialise Python code for the executors. It is an installation
+mismatch, not an ETL bug: PySpark ships every Python function with the cloudpickle
+version it bundles, and a cloudpickle older than the interpreter cannot read that
+interpreter's byte code. On such an install **every** PySpark job fails the same way -
+including `sc.parallelize([1, 2]).map(lambda x: x + 1)`.
+
+```bash
+python3 src/check_environment.py          # takes a second, no cluster needed
+python3 src/check_environment.py --spark  # also runs one distributed task
+```
+
+| Python | needs PySpark |
+| --- | --- |
+| 3.9 | >= 3.1 |
+| 3.10 | >= 3.2 |
+| 3.11 | >= 3.4 |
+| 3.12 | >= 3.5 |
+| 3.13 | >= 4.0 |
+
+Remedy: install the PySpark that matches the cluster in the ETL virtualenv
+(`pip install "pyspark==4.0.0"` for a Spark 4.0 cluster), or run the ETL with an
+interpreter the installed PySpark supports. Keep the driver and the executors on the
+same Python (`PYSPARK_PYTHON`, `PYSPARK_DRIVER_PYTHON`).
+
+The ETL runs this check itself before starting a cluster application
+(`spark.SPARK_PRECHECK_ENABLED`), so a broken installation fails in the
+`environment_check` stage with the versions and the remedy in the log and the failure
+e-mail, instead of mid-batch with a stack trace.
+
+Everything the ETL ships to the executors (`parse_partition`, `parse_journal_file`,
+`record_to_row`, the accumulator parameters) is defined at module level and bound with
+`functools.partial`, so cloudpickle serialises it **by reference** rather than by value;
+a test asserts that no `<locals>` closure can creep back in.
+
+### Other things worth checking first
+
+| Symptom | Look at |
+| --- | --- |
+| `ModuleNotFoundError: atm_ejournal_parser` on the executors | the modules are shipped with `addPyFile`; check the Spark log for "shipped ... module(s)" and that `src/` holds both `atm_ejournal_parser.py` and `spark_parser.py` |
+| `No suitable driver` / `ClassNotFoundException: org.postgresql.Driver` | `spark.SPARK_JARS` must list the PostgreSQL JDBC jar, and it must exist on the driver *and* the executors |
+| The ETL finds no files | `input.FILE_PATTERN` (globs are case sensitive), `input.MIN_FILE_AGE_SECONDS`, and `python3 -c "from atm_ejournal_parser import scan_input_tree"` for the parser's own discovery report |
+| A batch fails but the next run reprocesses everything | the tracking CSV was not written - check `processed/processed_files.csv` is writable and look for "processed-file tracking" lines in the run log |
+
+---
+
 ## Tests
 
 ```bash
@@ -506,7 +559,9 @@ behaviour per strategy), parquet (write, validation, failed write, cleanup, keep
 batches), logging (creation, one-year retention, 1 GB limit, oldest-first deletion,
 active-log protection, deletion errors), configuration (missing file, invalid YAML,
 missing/invalid values, profiles, masking), the JDBC write options and every load
-strategy, the CLI, and the Airflow DAG (loads, wiring, retries, both e-mails).
+strategy, the CLI, the Airflow DAG (loads, wiring, retries, both e-mails), and the
+environment preflight (version matrix, failure recognition, the remedy message, and that
+nothing shipped to the executors is a closure).
 
 ### Against a real database
 

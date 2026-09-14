@@ -223,6 +223,18 @@ def write_config(base_dir: str, batch_size: int = 2, extra_yaml: str = "") -> st
     section (for example a different ``PARQUET_CLEANUP_ENABLED``).
     """
     text = CONFIG_TEMPLATE.format(base_dir=base_dir, batch_size=batch_size) + extra_yaml
+
+    # The JVM is started once per pytest process and its classpath cannot change
+    # afterwards, so when the database integration suite is enabled every session
+    # in the run has to carry the JDBC driver - including the ones built by tests
+    # that never touch the database.
+    jdbc_jar = os.environ.get("ATM_ETL_TEST_JDBC_JAR")
+    if jdbc_jar:
+        text = text.replace('SPARK_JARS: ""', f'SPARK_JARS: "{jdbc_jar}"')
+        text = text.replace('      spark.ui.enabled: "false"',
+                            '      spark.ui.enabled: "false"\n'
+                            f'      spark.driver.extraClassPath: "{jdbc_jar}"')
+
     path = os.path.join(base_dir, "config", "atm_ejournal.conf")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:

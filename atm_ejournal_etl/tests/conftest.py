@@ -86,6 +86,11 @@ def spark():
                           .config("spark.driver.extraClassPath", jdbc_jar))
 
     session = builder.getOrCreate()
+    if jdbc_jar and jdbc_jar not in (session.conf.get("spark.jars", "") or ""):
+        # An earlier test built a session without the driver on the classpath;
+        # spark.jars cannot be added to a running context, so start a new one.
+        session.stop()
+        session = builder.getOrCreate()
     session.sparkContext.setLogLevel("ERROR")
     return session
 

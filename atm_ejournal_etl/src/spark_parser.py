@@ -25,6 +25,7 @@ be derived in SQL.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -33,6 +34,15 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 logger = logging.getLogger("atm_ejournal.parse")
+
+
+class SparkSerializationError(Exception):
+    """
+    Spark could not serialise the Python code of the job.
+
+    Almost always a PySpark/Python version mismatch on the driver rather than a
+    problem with this ETL - :mod:`check_environment` explains which.
+    """
 
 
 def build_schema():
@@ -248,55 +258,86 @@ def parse_journal_file(path: str,
                 f"{detail}\n{traceback.format_exc(limit=5)}")
 
 
-def make_partition_parser(options: Dict[str, Any], stats_accumulator, failure_accumulator):
-    """
-    Build the ``mapPartitions`` function used to parse a batch.
+# --------------------------------------------------------------------------- #
+# Executor-side entry points
+#
+# Everything Spark has to ship is defined at module level: a nested closure or a
+# class defined inside a function is serialised *by value* (its byte code is
+# pickled), which is exactly what breaks on a PySpark whose bundled cloudpickle
+# is older than the Python it runs on. Module level objects are pickled *by
+# reference* instead - the executor simply imports this module, which the ETL
+# ships with ``addPyFile``.
+# --------------------------------------------------------------------------- #
 
-    Counters and per-file failures travel back to the driver through
-    accumulators, so no extra Spark action is needed to collect them. A failed
-    file is reported with its file key, so the driver can exclude it from the
-    processed-file tracking while the rest of the batch still loads.
+
+def parse_partition(partition: Iterable[Tuple[str, str, str]],
+                    options: Optional[Dict[str, Any]] = None,
+                    stats_accumulator=None,
+                    failure_accumulator=None) -> Iterator[Tuple]:
     """
-    def parse_partition(partition: Iterable[Tuple[str, str, str]]) -> Iterator[Tuple]:
-        for path, atm_no, file_key in partition:
-            rows, stats, error = parse_journal_file(path, atm_no, file_key, options)
+    Parse one partition of ``(path, atm_no, file_key)`` tuples.
+
+    Bound to its arguments with :func:`functools.partial` before it is handed to
+    ``mapPartitions``. Counters and per-file failures travel back to the driver
+    through accumulators, so no extra Spark action is needed to collect them. A
+    failed file is reported with its file key, so the driver can exclude exactly
+    that file from the processed-file tracking while the rest of the batch still
+    loads.
+    """
+    options = options or {}
+    for path, atm_no, file_key in partition:
+        rows, stats, error = parse_journal_file(path, atm_no, file_key, options)
+        if stats_accumulator is not None:
             stats_accumulator.add(stats)
-            if error:
-                # The file key travels back so the driver can keep exactly this
-                # file out of processed_files.csv.
-                failure_accumulator.add([{"file_key": file_key, "path": path,
-                                          "error": error}])
-            for row in rows:
-                yield row
-    return parse_partition
+        if error and failure_accumulator is not None:
+            failure_accumulator.add([{"file_key": file_key, "path": path, "error": error}])
+        for row in rows:
+            yield row
+
+
+def make_partition_parser(options: Dict[str, Any], stats_accumulator, failure_accumulator):
+    """Bind :func:`parse_partition` to its arguments (picklable by reference)."""
+    return functools.partial(parse_partition,
+                             options=options,
+                             stats_accumulator=stats_accumulator,
+                             failure_accumulator=failure_accumulator)
 
 
 # --------------------------------------------------------------------------- #
 # Accumulators
 # --------------------------------------------------------------------------- #
 
+try:                                                   # module stays importable
+    from pyspark import AccumulatorParam as _AccumulatorParam
+except Exception:                                      # noqa: BLE001 - no Spark installed
+    _AccumulatorParam = object                         # type: ignore
+
+
+class DictAccumulatorParam(_AccumulatorParam):
+    """Sums the parser counters of every task into one dict."""
+
+    def zero(self, value):
+        return dict(value)
+
+    def addInPlace(self, left, right):
+        for key, amount in (right or {}).items():
+            left[key] = left.get(key, 0) + amount
+        return left
+
+
+class ListAccumulatorParam(_AccumulatorParam):
+    """Collects the per-file failures reported by the tasks."""
+
+    def zero(self, value):
+        return list(value)
+
+    def addInPlace(self, left, right):
+        left.extend(right or [])
+        return left
+
 
 def build_accumulators(spark):
     """Create the (stats, failures) accumulators used by a batch parse."""
-    from pyspark import AccumulatorParam                # noqa: PLC0415
-
-    class DictAccumulatorParam(AccumulatorParam):
-        def zero(self, value):
-            return dict(value)
-
-        def addInPlace(self, left, right):
-            for key, amount in (right or {}).items():
-                left[key] = left.get(key, 0) + amount
-            return left
-
-    class ListAccumulatorParam(AccumulatorParam):
-        def zero(self, value):
-            return list(value)
-
-        def addInPlace(self, left, right):
-            left.extend(right or [])
-            return left
-
     stats = spark.sparkContext.accumulator({key: 0 for key in STAT_KEYS},
                                            DictAccumulatorParam())
     failures = spark.sparkContext.accumulator([], ListAccumulatorParam())
@@ -333,5 +374,12 @@ def build_batch_dataframe(spark, files, cfg, batch_id: str, run_id: str,
            .parallelize(payload, numSlices=partitions)
            .mapPartitions(make_partition_parser(options, stats_accumulator, failure_accumulator)))
 
-    dataframe = spark.createDataFrame(rdd, schema=build_schema())
+    try:
+        dataframe = spark.createDataFrame(rdd, schema=build_schema())
+    except Exception as exc:                           # noqa: BLE001 - diagnosed, then re-raised
+        from check_environment import describe_serialization_failure, is_serialization_failure
+
+        if is_serialization_failure(exc):
+            raise SparkSerializationError(describe_serialization_failure(exc)) from exc
+        raise
     return dataframe, stats_accumulator, failure_accumulator

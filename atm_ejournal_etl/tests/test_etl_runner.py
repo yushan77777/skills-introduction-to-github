@@ -226,20 +226,28 @@ def test_delete_insert_strategy_keeps_a_reload_idempotent(etl_home, spark):
 
 
 def test_unreadable_file_is_not_marked_processed(etl_home, spark, monkeypatch):
+    """
+    A file that cannot be read when the executor gets to it is reported, kept out
+    of the tracking CSV and retried next run - while the rest of the batch loads.
+
+    The file is removed after discovery, which is the real-world shape of this
+    (a file moved or deleted between the directory walk and the parse).
+    """
     root = os.path.join(etl_home, "ATM_EJOURNALS")
     fixtures.build_input_tree(root, atms=1, files_per_atm=2, transactions=1)
-    broken = os.path.join(root, "ATM001", "EJOURNAL_10092026_00.TXT")
+    vanishing = os.path.join(root, "ATM001", "EJOURNAL_10092026_00.TXT")
     config_path = fixtures.write_config(etl_home, batch_size=5)
 
-    import spark_parser
-    original = spark_parser.parse_journal_file
+    import etl_runner
+    original_iter_batches = etl_runner.iter_batches
 
-    def failing(path, atm_no, file_key, options):
-        if path == broken:
-            return [], {}, f"{os.path.basename(path)}: OSError: simulated read failure"
-        return original(path, atm_no, file_key, options)
+    def remove_then_yield(files, batch_size):
+        for batch in original_iter_batches(files, batch_size):
+            if os.path.exists(vanishing):
+                os.remove(vanishing)
+            yield batch
 
-    monkeypatch.setattr(spark_parser, "parse_journal_file", failing)
+    monkeypatch.setattr(etl_runner, "iter_batches", remove_then_yield)
 
     summary, loader = _run(config_path, "RUN1")
 
@@ -247,7 +255,8 @@ def test_unreadable_file_is_not_marked_processed(etl_home, spark, monkeypatch):
     assert summary.files_processed == 1
     processed = _processed_rows(etl_home)
     assert [row["file_name"] for row in processed] == ["EJOURNAL_11092026_00.TXT"]
-    assert summary.failed_files[0]["path"] == broken
+    assert summary.failed_files[0]["path"] == vanishing
+    assert len(loader.rows) == 1                       # the readable file still loaded
 
 
 def test_dry_run_writes_parquet_but_touches_nothing_else(etl_home, spark):

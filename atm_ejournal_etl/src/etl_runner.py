@@ -230,12 +230,37 @@ class AtmEjournalEtl:
             return self.spark
         from spark_session import build_spark_session, ship_python_modules    # noqa: PLC0415
 
+        self._environment_preflight()
         self._prepare_stage("spark_session")
         self.spark = build_spark_session(self.cfg)
         ship_python_modules(self.spark)
         self.parquet = ParquetStage(self.cfg, self.spark)
         self.parquet.ensure_root()
         return self.spark
+
+    def _environment_preflight(self) -> None:
+        """
+        Confirm this installation can ship Python code to Spark before a cluster
+        application is started.
+
+        A PySpark older than the interpreter cannot serialise Python functions
+        (``PicklingError: ... IndexError: tuple index out of range``) and *every*
+        PySpark job fails on it. Catching it here costs a millisecond and turns
+        an opaque mid-batch stack trace into a message naming the remedy.
+        """
+        if not self.cfg.get_bool("spark.SPARK_PRECHECK_ENABLED", True):
+            logger.debug("environment preflight disabled (spark.SPARK_PRECHECK_ENABLED)")
+            return
+        from check_environment import (EnvironmentError_,                     # noqa: PLC0415
+                                       verify_python_serialization)
+
+        self._prepare_stage("environment_check")
+        try:
+            verify_python_serialization()
+        except EnvironmentError_ as exc:
+            logger.error("environment preflight failed:\n%s", exc)
+            raise EtlStageError(str(exc), stage="environment_check") from exc
+        logger.debug("environment preflight passed")
 
     def _ensure_loader(self):
         if self.loader is None:
