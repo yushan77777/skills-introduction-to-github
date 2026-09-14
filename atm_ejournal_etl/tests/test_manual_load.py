@@ -14,8 +14,9 @@ import pytest
 
 import fixtures
 from manual_load import (BatchReport, LoadedParquetRegistry, ManualLoadError,
-                         find_parquet_targets, load_parquet_path, print_reports,
-                         process_path, run_batches, unprocessed_files)
+                         describe_state, find_parquet_targets, load_parquet_path,
+                         print_reports, print_state, process_path, record_source_files,
+                         run_batches, unprocessed_files)
 
 pytest.importorskip("pyarrow", reason="pyarrow is not installed")
 pytestmark = pytest.mark.spark
@@ -311,3 +312,88 @@ def test_path_load_can_keep_the_original_ids(manual_cfg, etl_home, spark):
                       run_id="LOAD_RUN", stamp_ids=False, spark=spark, loader=loader)
 
     assert {row["ETL_RUN_ID"] for row in loader.rows} == {"PARSE_RUN"}
+
+
+# --------------------------------------------------------------------------- #
+# A path load records the journals the parquet came from
+# --------------------------------------------------------------------------- #
+
+
+def test_path_load_records_the_source_files(manual_cfg, etl_home, spark):
+    """
+    Otherwise those journals are parsed and loaded all over again by the next
+    batch run - the parquet knows which files it came from, so it is tracked.
+    """
+    run_batches(manual_cfg, batch_size=4, run_id="PARSE_RUN", spark=spark,
+                loader=fixtures.FakeGreenplumLoader(), keep_parquet=True)
+    os.remove(os.path.join(etl_home, "processed", "processed_files.csv"))   # as if never tracked
+
+    reports = load_parquet_path(manual_cfg, os.path.join(etl_home, "parquet", "PARSE_RUN"),
+                                spark=spark, loader=fixtures.FakeGreenplumLoader())
+
+    assert reports[0].files_recorded == 4
+    rows = _processed(etl_home)
+    assert len(rows) == 4
+    assert {row["file_name"] for row in rows} == {"EJOURNAL_10092026_00.TXT",
+                                                  "EJOURNAL_11092026_00.TXT"}
+    # and those files are not processed again
+    assert run_batches(manual_cfg, spark=spark, loader=fixtures.FakeGreenplumLoader()) == []
+
+
+def test_files_already_tracked_are_not_written_twice(manual_cfg, etl_home, spark):
+    run_batches(manual_cfg, batch_size=4, run_id="PARSE_RUN", spark=spark,
+                loader=fixtures.FakeGreenplumLoader(), keep_parquet=True)
+    assert len(_processed(etl_home)) == 4
+
+    reports = load_parquet_path(manual_cfg, os.path.join(etl_home, "parquet", "PARSE_RUN"),
+                                spark=spark, loader=fixtures.FakeGreenplumLoader())
+
+    assert reports[0].files_recorded == 0
+    assert len(_processed(etl_home)) == 4
+
+
+def test_recording_can_be_switched_off(manual_cfg, etl_home, spark):
+    run_batches(manual_cfg, batch_size=4, run_id="PARSE_RUN", spark=spark,
+                loader=fixtures.FakeGreenplumLoader(), keep_parquet=True)
+    os.remove(os.path.join(etl_home, "processed", "processed_files.csv"))
+
+    load_parquet_path(manual_cfg, os.path.join(etl_home, "parquet", "PARSE_RUN"),
+                      record_processed_files=False, spark=spark,
+                      loader=fixtures.FakeGreenplumLoader())
+
+    assert _processed(etl_home) == []
+
+
+def test_a_parquet_without_the_source_columns_is_reported(manual_cfg, etl_home, spark, caplog):
+    other = spark.createDataFrame([(1,)], schema="x int")
+    assert record_source_files(manual_cfg, other, "B", "R") == 0
+    assert "no SOURCE_FILE_KEY/SOURCE_PATH columns" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# describe_state
+# --------------------------------------------------------------------------- #
+
+
+def test_describe_state_explains_what_one_call_would_do(manual_cfg, etl_home, spark, capsys):
+    state = describe_state(manual_cfg)
+
+    assert state["files_discovered"] == 4
+    assert state["files_pending"] == 4
+    assert state["files_processed"] == 0
+    assert state["batch_size"] == 2
+    assert state["batches_pending"] == 2
+    assert state["processed_files_csv"].endswith(os.path.join("processed",
+                                                              "processed_files.csv"))
+    assert state["processed_files_csv_exists"] is False
+
+    run_batches(manual_cfg, batch_size=2, max_batches=1, spark=spark,
+                loader=fixtures.FakeGreenplumLoader())
+
+    after = print_state(manual_cfg)
+    assert after["files_processed"] == 2
+    assert after["files_pending"] == 2
+    assert after["processed_files_csv_exists"] is True
+    printed = capsys.readouterr().out
+    assert "one call with max_batches=1 processes 2 file(s)" in printed
+    assert "processed_files.csv" in printed

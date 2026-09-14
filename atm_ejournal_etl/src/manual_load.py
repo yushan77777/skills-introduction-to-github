@@ -342,6 +342,53 @@ def find_parquet_targets(path: str) -> List[str]:
     return targets
 
 
+def record_source_files(cfg, dataframe, batch_id: str, run_id: str,
+                        records: Optional[int] = None) -> int:
+    """
+    Append the journal files a parquet came from to ``processed_files.csv``.
+
+    Every row carries ``SOURCE_FILE_KEY`` / ``SOURCE_PATH`` / ``ATM_NO``, so a
+    parquet that is loaded from a path can be tracked exactly like a batch the
+    ETL parsed itself - otherwise those journals would be parsed and loaded all
+    over again on the next run. Files already in the CSV are not written twice.
+    Returns the number of rows appended.
+    """
+    registry = _registry(cfg)
+    columns = set(dataframe.columns)
+    if not {"SOURCE_FILE_KEY", "SOURCE_PATH"} <= columns:
+        logger.warning("parquet has no SOURCE_FILE_KEY/SOURCE_PATH columns - its source "
+                       "files cannot be recorded in %s", registry.csv_path)
+        return 0
+
+    known = registry.load_keys()
+    selected = ["SOURCE_FILE_KEY", "SOURCE_PATH"] + (["ATM_NO"] if "ATM_NO" in columns else [])
+    files: List[DiscoveredFile] = []
+    missing = 0
+    for row in dataframe.select(*selected).distinct().collect():
+        key = (row["SOURCE_FILE_KEY"] or "").strip()
+        if not key or key in known:
+            continue
+        path = (row["SOURCE_PATH"] or key).strip()
+        size, mtime = 0, 0.0
+        try:
+            stat = os.stat(path)
+            size, mtime = stat.st_size, stat.st_mtime
+        except OSError:
+            missing += 1
+        files.append(DiscoveredFile(
+            path=path, relative_path=key,
+            atm_no=(row["ATM_NO"] if "ATM_NO" in selected else "") or "",
+            size=size, mtime=mtime))
+
+    if missing:
+        logger.warning("%d source file(s) named in the parquet no longer exist on disk - "
+                       "they are still recorded as processed", missing)
+    if not files:
+        logger.info("no new source files to record - they are already in %s", registry.csv_path)
+        return 0
+    return registry.append_batch(files, batch_id, run_id, records=records)
+
+
 @dataclass
 class PathLoadReport:
     """What :func:`load_parquet_path` did with one parquet target."""
@@ -349,6 +396,7 @@ class PathLoadReport:
     parquet_path: str
     rows: int = 0
     rows_loaded: int = 0
+    files_recorded: int = 0
     duration_seconds: float = 0.0
     status: str = "SUCCESS"
     error: str = ""
@@ -365,6 +413,7 @@ def load_parquet_path(cfg,
                       spark=None,
                       loader=None,
                       record: bool = True,
+                      record_processed_files: bool = True,
                       stamp_ids: bool = True,
                       on_target: Optional[Callable[[PathLoadReport], None]] = None
                       ) -> List[PathLoadReport]:
@@ -375,6 +424,12 @@ def load_parquet_path(cfg,
     ``processed/loaded_parquet.csv``, so pointing this at the same folder again
     inserts only the parquet files that were not inserted before. Set it to
     ``False`` to reload everything under the path.
+
+    ``record_processed_files`` (default) also appends the journal files the
+    parquet was built from to ``processed_files.csv``, using the
+    ``SOURCE_FILE_KEY`` / ``SOURCE_PATH`` columns every row carries. Without it
+    those journals would be parsed and loaded again by the next batch run. Turn
+    it off to load a parquet without touching the processed-file tracking.
 
     The write goes through the same :class:`greenplum_loader.GreenplumLoader` the
     ETL uses, so the configured load strategy, the batch control row and the row
@@ -425,6 +480,9 @@ def load_parquet_path(cfg,
                                           file_count=0, parquet_path=target,
                                           expected_rows=report.rows if stamp_ids else None)
             report.rows_loaded = result.rows_loaded
+            if record_processed_files:
+                report.files_recorded = record_source_files(
+                    cfg, dataframe, target_batch_id, run_id, records=report.rows)
             if record:
                 loaded.append(target, report.rows_loaded, target_batch_id, run_id)
         except Exception as exc:                        # noqa: BLE001 - reported per target
@@ -437,6 +495,77 @@ def load_parquet_path(cfg,
             if on_target is not None:
                 on_target(report)
     return reports
+
+
+# --------------------------------------------------------------------------- #
+# "why did it do that" - the state a manual run works from
+# --------------------------------------------------------------------------- #
+
+
+def describe_state(cfg, input_path: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Where the tracking lives and what the next call would do.
+
+    Answers the two questions a manual run raises most often: *how many files
+    will one call take* (batch size x max_batches) and *where is
+    processed_files.csv* - it is the configured path, which is not necessarily
+    the folder the notebook runs in.
+    """
+    registry = _registry(cfg)
+    loaded = _loaded_registry(cfg)
+    input_path = input_path or cfg.path("input.INPUT_PATH")
+
+    processed_keys = registry.load_keys(refresh=True)
+    discovered = pending = 0
+    for item in discover_files(
+            input_path=input_path,
+            patterns=cfg.get_list("input.FILE_PATTERN"),
+            folder_depth=cfg.get_int("input.ATM_FOLDER_DEPTH", 1),
+            min_file_age_seconds=cfg.get_int("input.MIN_FILE_AGE_SECONDS", 0),
+            sniff_unknown_extensions=cfg.get_bool("input.SNIFF_UNKNOWN_EXTENSIONS", False)):
+        discovered += 1
+        if item.key(registry.key_mode) not in processed_keys:
+            pending += 1
+
+    batch_size = cfg.get_int("input.BATCH_SIZE")
+    state = {
+        "input_path": input_path,
+        "file_pattern": ",".join(cfg.get_list("input.FILE_PATTERN")),
+        "min_file_age_seconds": cfg.get_int("input.MIN_FILE_AGE_SECONDS", 0),
+        "batch_size": batch_size,
+        "files_discovered": discovered,
+        "files_processed": len(processed_keys),
+        "files_pending": pending,
+        "batches_pending": (pending + batch_size - 1) // batch_size,
+        "processed_files_csv": registry.csv_path,
+        "processed_files_csv_exists": os.path.exists(registry.csv_path),
+        "processed_files_csv_rows": len(processed_keys),
+        "loaded_parquet_csv": loaded.csv_path,
+        "loaded_parquet_csv_exists": os.path.exists(loaded.csv_path),
+        "loaded_parquet_targets": len(loaded.loaded_paths(refresh=True)),
+        "parse_engine": cfg.get("parser.PARSE_ENGINE"),
+        "greenplum_table": f"{cfg.get('greenplum.GREENPLUM_SCHEMA')}."
+                           f"{cfg.get('greenplum.GREENPLUM_TABLE')}",
+    }
+    return state
+
+
+def print_state(cfg, input_path: Optional[str] = None) -> Dict[str, Any]:
+    """:func:`describe_state`, printed - with what one call would process."""
+    state = describe_state(cfg, input_path)
+    for key in ("input_path", "file_pattern", "min_file_age_seconds", "batch_size",
+                "files_discovered", "files_processed", "files_pending", "batches_pending",
+                "processed_files_csv", "processed_files_csv_exists", "processed_files_csv_rows",
+                "loaded_parquet_csv", "loaded_parquet_csv_exists", "loaded_parquet_targets",
+                "parse_engine", "greenplum_table"):
+        print(f"{key:<28} {state[key]}")
+    print()
+    print(f"one call with max_batches=1 processes {min(state['batch_size'], state['files_pending'])}"
+          f" file(s); max_batches=None processes all {state['files_pending']}")
+    if not state["processed_files_csv_exists"]:
+        print("processed_files.csv does not exist yet - it is created by the first successful "
+              "batch, at the path above (not in the notebook's folder)")
+    return state
 
 
 # --------------------------------------------------------------------------- #
@@ -465,10 +594,11 @@ def print_reports(reports: List[Any]) -> None:
               f"{sum(r.files_failed for r in reports):>8}"
               f"{sum(r.duration_seconds for r in reports):>9.1f}")
     else:
-        print(f"{'ROWS':>10}{'LOADED':>10}{'SECONDS':>9}  PARQUET")
+        print(f"{'ROWS':>10}{'LOADED':>10}{'FILES':>8}{'SECONDS':>9}  PARQUET")
         for report in reports:
-            print(f"{report.rows:>10}{report.rows_loaded:>10}{report.duration_seconds:>9.1f}  "
-                  f"{report.parquet_path}"
+            print(f"{report.rows:>10}{report.rows_loaded:>10}{report.files_recorded:>8}"
+                  f"{report.duration_seconds:>9.1f}  {report.parquet_path}"
                   + (f"  {report.status}: {report.error}" if report.error else ""))
-        print(f"{sum(r.rows_loaded for r in reports):>10} row(s) loaded from "
+        print(f"{sum(r.rows_loaded for r in reports):>10} row(s) loaded and "
+              f"{sum(r.files_recorded for r in reports)} source file(s) recorded from "
               f"{len(reports)} parquet target(s)")

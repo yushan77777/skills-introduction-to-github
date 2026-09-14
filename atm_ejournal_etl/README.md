@@ -318,6 +318,19 @@ them.
 **A whole folder of journals**: `process_path(cfg, "/path/to/journals", batch_size=500)` -
 `run_batches` pointed at that directory with no batch limit.
 
+**"Only N files were processed"** - one call takes `batch_size x max_batches` files:
+`batch_size=None` means `input.BATCH_SIZE` from the configuration and `max_batches=1` stops
+after the first batch. `print_state(cfg)` prints the batch size, how many files are pending
+and what one call would take.
+
+**"processed_files.csv was not updated"** - it is written at the *configured* path
+(`tracking.PROCESSED_FILES_CSV`, by default `<ETL_HOME>/processed/processed_files.csv`), not
+in the folder the notebook runs from; `print_state(cfg)` prints that path and its row count.
+A batch records its files only after Greenplum confirms the insert, so a failed batch leaves
+the CSV untouched on purpose. A path load records the journals its parquet came from as
+well (from the `SOURCE_FILE_KEY` / `SOURCE_PATH` columns) unless
+`record_processed_files=False`.
+
 ---
 
 ## Parse engines
