@@ -255,6 +255,8 @@ class GreenplumLoader:
         self.control = str(cfg.get("greenplum.GREENPLUM_CONTROL_TABLE",
                                    "atm_ejournal_batch_control"))
 
+        self.write_format = str(cfg.get("greenplum.GREENPLUM_WRITE_FORMAT", "jdbc")).lower()
+        self.connector_options = dict(cfg.get("greenplum.GREENPLUM_CONNECTOR_OPTIONS") or {})
         self.write_mode = str(cfg.get("greenplum.GREENPLUM_WRITE_MODE", "append")).lower()
         self.strategy = str(cfg.get("greenplum.GREENPLUM_LOAD_STRATEGY", "append")).lower()
         self.merge_keys = cfg.get_list("greenplum.GREENPLUM_MERGE_KEYS")
@@ -301,11 +303,17 @@ class GreenplumLoader:
 
     def write_dataframe(self, dataframe, table: str, mode: str = "append") -> float:
         """
-        The Spark JDBC write:
+        Write a DataFrame to one Greenplum table.
+
+        ``GREENPLUM_WRITE_FORMAT: jdbc`` (default) is the plain Spark JDBC write::
 
             df.write.format("jdbc").option("url", ...).option("dbtable", ...)
               .option("user", ...).option("password", ...).option("driver", ...)
               .mode(mode).save()
+
+        ``GREENPLUM_WRITE_FORMAT: greenplum`` uses the greenplum-spark connector
+        instead, with the options from ``GREENPLUM_CONNECTOR_OPTIONS``
+        (server.port, segment.num, numWriteTasks, gpfdist.sessions, compression).
 
         Returns the elapsed seconds. Raises :class:`GreenplumLoadError` with the
         credentials kept out of the message.
@@ -320,23 +328,36 @@ class GreenplumLoader:
             except Exception:                          # noqa: BLE001 - partitioning is advisory
                 to_write = dataframe
 
-        logger.info("Greenplum write | table=%s | mode=%s | url=%s | user=%s",
-                    self.dbtable(table), mode, self.url, self.user)
+        logger.info("Greenplum write | table=%s | mode=%s | format=%s | url=%s | user=%s",
+                    self.dbtable(table), mode, self.write_format, self.url, self.user)
         started = time.time()
         try:
-            (to_write.write
-             .format("jdbc")
-             .option("url", self.url)
-             .option("dbtable", self.dbtable(table))
-             .option("user", self.user)
-             .option("password", self.password)
-             .option("driver", self.driver)
-             .option("batchsize", self.batch_size)
-             .mode(mode)
-             .save())
+            writer = to_write.write.format(self.write_format)
+            if self.write_format == "greenplum":
+                # greenplum-spark connector: the segments write in parallel through
+                # gpfdist, so it takes the schema and table separately plus the
+                # tuning options from GREENPLUM_CONNECTOR_OPTIONS.
+                writer = (writer
+                          .option("url", self.url)
+                          .option("dbschema", self.schema)
+                          .option("dbtable", table)
+                          .option("user", self.user)
+                          .option("password", self.password)
+                          .option("driver", self.driver))
+                for key, value in self.connector_options.items():
+                    writer = writer.option(str(key), str(value))
+            else:
+                writer = (writer
+                          .option("url", self.url)
+                          .option("dbtable", self.dbtable(table))
+                          .option("user", self.user)
+                          .option("password", self.password)
+                          .option("driver", self.driver)
+                          .option("batchsize", self.batch_size))
+            writer.mode(mode).save()
         except Exception as exc:                       # noqa: BLE001
-            raise GreenplumLoadError(f"JDBC write into {self.dbtable(table)} failed: "
-                                     f"{exc}") from exc
+            raise GreenplumLoadError(f"{self.write_format} write into {self.dbtable(table)} "
+                                     f"failed: {exc}") from exc
         elapsed = time.time() - started
         logger.info("Greenplum write completed | table=%s | %.1fs", self.dbtable(table), elapsed)
         return elapsed

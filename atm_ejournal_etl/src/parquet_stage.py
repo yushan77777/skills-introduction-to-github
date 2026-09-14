@@ -38,10 +38,14 @@ class ParquetStageError(Exception):
 class ParquetStage:
     """Owns the intermediate parquet directory for one ETL."""
 
-    def __init__(self, cfg, spark=None):
+    def __init__(self, cfg, spark=None, subdir: Optional[str] = None):
         self.cfg = cfg
         self.spark = spark
         self.root = cfg.path("parquet.PARQUET_PATH", "parquet")
+        if subdir:
+            # Keeps the parquet of two runs apart when it is not deleted after
+            # the load (manual runs with keep_parquet=True).
+            self.root = os.path.join(self.root, str(subdir))
         self.compression = str(cfg.get("parquet.PARQUET_COMPRESSION", "snappy"))
         self.coalesce_partitions = cfg.get_int("parquet.PARQUET_COALESCE_PARTITIONS", 0)
         self.cleanup_enabled = cfg.get_bool("parquet.PARQUET_CLEANUP_ENABLED", True)

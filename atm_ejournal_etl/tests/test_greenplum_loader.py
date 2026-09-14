@@ -170,7 +170,7 @@ def test_write_failure_is_wrapped(loader):
         def write(self):
             raise RuntimeError("connection refused")
 
-    with pytest.raises(GreenplumLoadError, match="JDBC write into atm.atm_ejournal_withdrawals"):
+    with pytest.raises(GreenplumLoadError, match="jdbc write into atm.atm_ejournal_withdrawals"):
         loader.write_dataframe(Exploding(), loader.table)
 
 
@@ -348,3 +348,46 @@ def test_password_is_not_echoed_in_a_connection_error(cfg):
         ControlConnection.open("jdbc:postgresql://127.0.0.1:1/db", "user", "TOP-SECRET",
                                spark=None)
     assert "TOP-SECRET" not in str(error.value)
+
+
+# --------------------------------------------------------------------------- #
+# The greenplum-spark connector writer
+# --------------------------------------------------------------------------- #
+
+
+def test_connector_writer_uses_dbschema_and_its_options(cfg):
+    cfg._data["greenplum"]["GREENPLUM_WRITE_FORMAT"] = "greenplum"      # noqa: SLF001
+    cfg._data["greenplum"]["GREENPLUM_CONNECTOR_OPTIONS"] = {           # noqa: SLF001
+        "server.port": "32768-42768", "segment.num": "16",
+        "numWriteTasks": "32", "gpfdist.sessions": "32", "compression": "gzip",
+    }
+    instance = GreenplumLoader(cfg)
+    dataframe = FakeDataFrame()
+
+    instance.write_dataframe(dataframe, instance.table, mode="append")
+
+    assert dataframe.sink["format"] == "greenplum"
+    options = dataframe.sink["options"]
+    assert options["dbschema"] == "atm"
+    assert options["dbtable"] == "atm_ejournal_withdrawals"     # schema passed separately
+    assert options["url"] == "jdbc:postgresql://localhost:5432/testdb"
+    assert options["server.port"] == "32768-42768"
+    assert options["segment.num"] == "16"
+    assert options["numWriteTasks"] == "32"
+    assert options["gpfdist.sessions"] == "32"
+    assert options["compression"] == "gzip"
+    assert "batchsize" not in options                           # jdbc-only option
+    assert dataframe.sink["mode"] == "append"
+
+
+def test_connector_failures_name_the_format(cfg):
+    cfg._data["greenplum"]["GREENPLUM_WRITE_FORMAT"] = "greenplum"      # noqa: SLF001
+    instance = GreenplumLoader(cfg)
+
+    class Exploding(FakeDataFrame):
+        @property
+        def write(self):
+            raise RuntimeError("gpfdist port range unavailable")
+
+    with pytest.raises(GreenplumLoadError, match="greenplum write into"):
+        instance.write_dataframe(Exploding(), instance.table)

@@ -41,9 +41,11 @@ retention, Airflow orchestration and notifications.
 | `src/greenplum_loader.py` | The Spark JDBC write + load strategies + batch control table |
 | `src/mail_util.py` | Success/failure e-mails |
 | `src/etl_runner.py` | The orchestrator (batch loop, recovery, run summary) |
+| `src/manual_load.py` | Manual runners: batch-wise process+insert, and "load this path" |
 | `src/run_etl.py` | Command line entry point |
 | `dags/atm_ejournal_etl_dag.py` | Airflow DAG with failure/success e-mails |
-| `notebooks/run_atm_ejournal_etl.ipynb` | Manual run: dry run, batch limit, inspection |
+| `notebooks/manual_batch_load.ipynb` | **Manual run**: process+insert batch by batch, and load a parquet path |
+| `notebooks/run_atm_ejournal_etl.ipynb` | Manual run through the full orchestrator: dry run, batch limit, inspection |
 | `notebooks/run_atm_ejournal_parser.ipynb` | **Existing** parser notebook, unchanged. It imports the parser from the folder it runs in, so set `MODULE_DIR` in its first cell to `../src` |
 | `tests/` | Unit tests (SMTP and Airflow mocked) and an opt-in real-database suite |
 | `logs/`, `parquet/`, `processed/` | Runtime directories (created if missing) |
@@ -165,6 +167,8 @@ The shipped defaults are the cluster settings already in use (master URL, connec
 | `GREENPLUM_SCHEMA` / `GREENPLUM_TABLE` | Target table; together they form the `dbtable` option |
 | `GREENPLUM_LOAD_STRATEGY` | `append` (default), `overwrite`, `delete_insert_by_source_file`, `merge_by_key`, `truncate_load` |
 | `GREENPLUM_WRITE_MODE` | `append` or `overwrite` - the `.mode(...)` of the write |
+| `GREENPLUM_WRITE_FORMAT` | `jdbc` (default) or `greenplum` (the greenplum-spark connector) |
+| `GREENPLUM_CONNECTOR_OPTIONS` | Connector-only options: `server.port`, `segment.num`, `numWriteTasks`, `gpfdist.sessions`, `compression` |
 | `GREENPLUM_STAGING_TABLE` | Staging table, used by the staged strategies only |
 | `GREENPLUM_CONTROL_TABLE` | Batch control table - what a restart reads |
 | `GREENPLUM_USE_CONTROL_TABLE` | Record each loaded batch there (default true) |
@@ -260,6 +264,59 @@ De-duplication of retries stays identical to the pandas version: `extract_transa
 namespaces every session id with its file (`<file>#S00001`), so a retry chain can never
 span two files, and collapsing per file gives exactly the same rows as the folder-level
 call - this is pinned by `tests/test_spark_parser.py`.
+
+---
+
+## Running it by hand
+
+`notebooks/manual_batch_load.ipynb` drives the same functions the scheduled ETL uses, for
+an initial load or a catch-up you want to watch. Both entry points live in
+`src/manual_load.py`, so they can also be called from a script:
+
+```python
+from config_loader import load_config
+from manual_load import run_batches, load_parquet_path, process_path, print_reports
+
+cfg = load_config("config/atm_ejournal.conf", "atm_ejournal")
+```
+
+**Batch-wise process and insert.** For each batch: parse -> one parquet -> insert into
+Greenplum -> record the files in `processed_files.csv` -> delete the parquet -> next batch.
+
+```python
+reports = run_batches(cfg, batch_size=500, max_batches=1,
+                      on_batch=lambda r: print(r.batch_id, r.status, r.rows_loaded))
+print_reports(reports)
+```
+
+| Argument | Meaning |
+| --- | --- |
+| `batch_size` | Files per batch (default `input.BATCH_SIZE`) |
+| `max_batches` | Stop after N batches; `None` processes everything still pending |
+| `input_path` | Read another directory instead of `input.INPUT_PATH` |
+| `keep_parquet` | Keep each batch's parquet (filed under the run id) instead of deleting it |
+| `on_batch` | Called with each `BatchReport` as it finishes, for live progress |
+
+Files are marked processed only after Greenplum confirms the insert, and a batch that fails
+is reported while the run continues - its files stay pending for the next call.
+
+**Load a path that was not inserted yet.** Point it at a `.parquet` file, a Spark parquet
+directory, or a folder holding several of them, and it writes the whole thing to Greenplum:
+
+```python
+load_parquet_path(cfg, "/analyticsShare/.../output/")            # only what is new
+load_parquet_path(cfg, "/analyticsShare/.../output/", only_new=False)   # everything again
+```
+
+`only_new=True` (default) skips the targets recorded in `processed/loaded_parquet.csv`, so
+running it again on the same folder inserts only the parquet that has not been inserted
+yet. `ETL_RUN_ID` and `BATCH_ID` are stamped with this load's ids before the write (a
+JVM-side `withColumn(lit(...))`), which is what the control row, the row-count check and
+the retry guard key on; pass `stamp_ids=False` to load the rows exactly as the file has
+them.
+
+**A whole folder of journals**: `process_path(cfg, "/path/to/journals", batch_size=500)` -
+`run_batches` pointed at that directory with no batch limit.
 
 ---
 
@@ -363,6 +420,12 @@ df.write \
 `url`, `user`, `password`, `driver`, `schema` and `table` come straight from the
 `greenplum:` section; the DataFrame is the batch read back from its parquet, never the
 in-memory parse result.
+
+With `GREENPLUM_WRITE_FORMAT: greenplum` the same write goes through the greenplum-spark
+connector instead (segments writing in parallel through gpfdist), taking `dbschema` and
+`dbtable` separately plus the `GREENPLUM_CONNECTOR_OPTIONS` - `server.port`,
+`segment.num`, `numWriteTasks`, `gpfdist.sessions`, `compression`. That needs
+`greenplum-connector-apache-spark-*.jar` on `SPARK_JARS`.
 
 **Strategies.** `append` (default) and `overwrite` do exactly the write above against the
 target table. The staged strategies write the batch into `GREENPLUM_STAGING_TABLE` with

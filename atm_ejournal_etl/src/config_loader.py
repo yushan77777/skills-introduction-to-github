@@ -229,6 +229,11 @@ class EtlConfig:
             raise ConfigError(f"[{self.etl_name}] tracking.FILE_KEY_MODE must be one of "
                               "path, path_size, path_mtime")
 
+        write_format = str(self.get("greenplum.GREENPLUM_WRITE_FORMAT", "jdbc")).lower()
+        if write_format not in {"jdbc", "greenplum"}:
+            raise ConfigError(f"[{self.etl_name}] greenplum.GREENPLUM_WRITE_FORMAT must be "
+                              "'jdbc' or 'greenplum'")
+
         write_mode = str(self.get("greenplum.GREENPLUM_WRITE_MODE", "append")).lower()
         if write_mode not in {"append", "overwrite"}:
             raise ConfigError(f"[{self.etl_name}] greenplum.GREENPLUM_WRITE_MODE must be "
