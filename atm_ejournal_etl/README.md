@@ -7,7 +7,7 @@ Input files
     -> processed-file check          processed/processed_files.csv
     -> unprocessed files
     -> batch selection               input.BATCH_SIZE
-    -> Spark ETL                     the existing parser, on the executors
+    -> parse                         the existing parser (local or on the executors)
     -> Parquet                       parquet/batch_nnnn
     -> Greenplum                     staging -> target, one transaction
     -> processed-file tracking       append-only, after the commit
@@ -35,7 +35,8 @@ retention, Airflow orchestration and notifications.
 | `src/log_manager.py` | Run log, per-batch logs, retention / size sweep |
 | `src/file_registry.py` | Discovery, batching, `processed_files.csv`, pending markers |
 | `src/spark_session.py` | SparkSession from the configuration |
-| `src/spark_parser.py` | Runs the existing parser on the executors, fixed output schema |
+| `src/spark_parser.py` | Spark engine: runs the existing parser on the executors; owns the output schema |
+| `src/local_parser.py` | Local engine: runs the existing parser here and writes the parquet with PyArrow |
 | `src/parquet_stage.py` | Batch parquet write, validation, read-back, cleanup |
 | `src/greenplum_loader.py` | The Spark JDBC write + load strategies + batch control table |
 | `src/mail_util.py` | Success/failure e-mails |
@@ -175,9 +176,13 @@ The shipped defaults are the cluster settings already in use (master URL, connec
 
 ### `parser`
 
-`KEEP_LAST_FAILURE`, `LINK_FAILED_ACROSS_AMOUNTS`, `RETRY_WINDOW_SECONDS` are passed
-straight to the existing `deduplicate_attempts()`. `KEEP_UNPARSED_RECORDS` decides whether
-low-confidence blocks (`PARSE_CONFIDENT = false`) are loaded or dropped.
+| Key | Meaning |
+| --- | --- |
+| `PARSE_ENGINE` | `local`, `spark` or `auto` (default) - see [Parse engines](#parse-engines) |
+| `PARSE_WORKERS` | Local engine: parser processes (`0` = one per CPU core) |
+| `PARSE_WRITE_CHUNK_RECORDS` | Local engine: records buffered before a parquet row group is written |
+| `KEEP_LAST_FAILURE`, `LINK_FAILED_ACROSS_AMOUNTS`, `RETRY_WINDOW_SECONDS` | Passed straight to the existing `deduplicate_attempts()` |
+| `KEEP_UNPARSED_RECORDS` | Load low-confidence blocks (`PARSE_CONFIDENT = false`) or drop them |
 
 ### `mail`
 
@@ -255,6 +260,44 @@ De-duplication of retries stays identical to the pandas version: `extract_transa
 namespaces every session id with its file (`<file>#S00001`), so a retry chain can never
 span two files, and collapsing per file gives exactly the same rows as the folder-level
 call - this is pinned by `tests/test_spark_parser.py`.
+
+---
+
+## Parse engines
+
+The parsing logic is the same module either way - what differs is *where* it runs.
+
+| | `local` | `spark` |
+| --- | --- | --- |
+| Journals parsed by | this host, one process pool (`PARSE_WORKERS`) | the executors, one task per file |
+| Parquet written by | PyArrow, streamed in chunks | Spark |
+| Python code sent to Spark | **none** | the parser modules (`addPyFile`) |
+| Spark is used for | `spark.read.parquet` + the JDBC write (JVM only) | everything |
+| Works on | any PySpark/Python combination | a PySpark that supports the interpreter |
+| Scales with | the ETL host's cores | the cluster |
+
+`auto` (the default) picks `spark` when the installation can serialise Python code for the
+executors and `local` when it cannot, logging which and why.
+
+**When `local` is the answer.** PySpark serialises every Python function it ships with the
+cloudpickle version it bundles. On Spark 3.1.x (cloudpickle 1.6) under Python 3.11 that
+cannot work at all - `rdd.mapPartitions`, `createDataFrame` and Python UDFs all fail with
+`PicklingError: ... IndexError: tuple index out of range`. The local engine avoids the
+problem instead of fighting it: no Python crosses into Spark, so the combination stops
+mattering.
+
+**Memory.** Rows are streamed into the parquet file `PARSE_WRITE_CHUNK_RECORDS` at a time,
+so a batch never has to fit in memory - the footprint is one chunk plus the single journal
+file being parsed, whatever `BATCH_SIZE` is.
+
+**Throughput.** `PARSE_WORKERS` parser processes run in parallel (the pool uses the
+standard library's pickle on a module level function, never cloudpickle). On a big initial
+load with a cluster available, `spark` still spreads the work wider - so upgrade PySpark
+when you can and switch back with `PARSE_ENGINE: spark` or `auto`.
+
+**The parquet is identical.** Both engines build it from one schema description
+(`spark_parser.SCHEMA_FIELDS`), PyArrow writes it with `flavor="spark"`, and a test asserts
+the two engines produce the same rows for the same input.
 
 ---
 
@@ -476,8 +519,10 @@ tail -100 logs/atm_ejournal_etl_<run>.log
 * **Lazy discovery** (generators end to end) means a directory with millions of files is
   walked without building a list of it; `PRESCAN_ENABLED` makes the reporting pass
   metadata-only and can be switched off entirely.
-* **Parsing happens on the executors**, one file per task; only paths are shipped.
-  `SPARK_PARSE_PARTITIONS` defaults to the executor core slots, capped at the file count.
+* **Parsing is parallel in both engines**: the Spark engine ships one task per file
+  (`SPARK_PARSE_PARTITIONS` defaults to the executor core slots, capped at the file count);
+  the local engine runs `PARSE_WORKERS` parser processes on the ETL host and streams the
+  rows into the parquet in chunks, so neither engine holds a batch in memory.
 * **Parquet between the stages** keeps the transformed batch out of memory across the
   Greenplum load and makes the load re-runnable; `PARQUET_COALESCE_PARTITIONS` avoids a
   swarm of tiny files, and compression is configurable.
@@ -517,10 +562,17 @@ python3 src/check_environment.py --spark  # also runs one distributed task
 | 3.12 | >= 3.5 |
 | 3.13 | >= 4.0 |
 
-Remedy: install the PySpark that matches the cluster in the ETL virtualenv
-(`pip install "pyspark==4.0.0"` for a Spark 4.0 cluster), or run the ETL with an
-interpreter the installed PySpark supports. Keep the driver and the executors on the
-same Python (`PYSPARK_PYTHON`, `PYSPARK_DRIVER_PYTHON`).
+**The ETL runs anyway.** `parser.PARSE_ENGINE: auto` (the default) detects this and
+switches to the local engine: the journals are parsed on the ETL host, the parquet is
+written with PyArrow, and Spark only reads that parquet and performs the JDBC write - no
+Python crosses into Spark. Nothing else about the run changes. This is the supported way
+to run on, say, **Spark 3.1.3 with Python 3.11**; it needs `pip install pyarrow`.
+
+To parse on the executors instead, install the PySpark that matches the cluster in the ETL
+virtualenv (`pip install "pyspark==4.0.0"` for a Spark 4.0 cluster) or run the ETL with an
+interpreter the installed PySpark supports, then set `PARSE_ENGINE: spark` (or leave
+`auto`). Keep the driver and the executors on the same Python (`PYSPARK_PYTHON`,
+`PYSPARK_DRIVER_PYTHON`).
 
 The ETL runs this check itself before starting a cluster application
 (`spark.SPARK_PRECHECK_ENABLED`), so a broken installation fails in the
@@ -559,9 +611,11 @@ behaviour per strategy), parquet (write, validation, failed write, cleanup, keep
 batches), logging (creation, one-year retention, 1 GB limit, oldest-first deletion,
 active-log protection, deletion errors), configuration (missing file, invalid YAML,
 missing/invalid values, profiles, masking), the JDBC write options and every load
-strategy, the CLI, the Airflow DAG (loads, wiring, retries, both e-mails), and the
-environment preflight (version matrix, failure recognition, the remedy message, and that
-nothing shipped to the executors is a closure).
+strategy, the CLI, the Airflow DAG (loads, wiring, retries, both e-mails), the environment
+preflight (version matrix, failure recognition, the remedy message, and that nothing
+shipped to the executors is a closure), and both parse engines - including that they
+produce the same rows, that `auto` selects the local engine when Python cannot be shipped,
+and that a local dry run starts no Spark application at all.
 
 ### Against a real database
 

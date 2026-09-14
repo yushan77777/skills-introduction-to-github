@@ -41,9 +41,11 @@ pytestmark = [
 ]
 
 
-def _configure(etl_home: str, batch_size: int, strategy: str, table: str) -> str:
+def _configure(etl_home: str, batch_size: int, strategy: str, table: str,
+               parse_engine: str = "spark") -> str:
     """Write the test configuration, pointed at the real database."""
-    config_path = fixtures.write_config(etl_home, batch_size=batch_size)
+    config_path = fixtures.write_config(etl_home, batch_size=batch_size,
+                                        parse_engine=parse_engine)
     with open(config_path) as handle:
         data = yaml.safe_load(handle)
 
@@ -170,3 +172,29 @@ def test_is_batch_committed_reflects_a_real_load(etl_home, real_table, spark):
 
     assert loader.is_batch_committed("IT1", "BATCH_0001") == 2
     assert loader.is_batch_committed("IT1", "BATCH_0099") is None
+
+
+def test_local_engine_loads_into_the_database(etl_home, real_table, spark):
+    """
+    The path for a PySpark that cannot ship Python code: parsed here, written to
+    parquet with PyArrow, loaded by Spark over JDBC.
+    """
+    pytest.importorskip("pyarrow", reason="pyarrow is not installed")
+    table, _config_path, loader = real_table
+    config_path = _configure(etl_home, batch_size=2, strategy="append", table=table,
+                             parse_engine="local")
+    fixtures.build_input_tree(os.path.join(etl_home, "ATM_EJOURNALS"),
+                              atms=2, files_per_atm=1, transactions=2)
+
+    etl = AtmEjournalEtl(load_config(config_path, "atm_ejournal"), run_id="ITL1")
+    summary = etl.run()
+
+    assert etl.parse_engine == "local"
+    assert summary.status == "SUCCESS"
+    assert summary.records_loaded == 4
+    assert _sql(loader, f'SELECT COUNT(*) FROM "{DB_SCHEMA}"."{table}"') == 4
+    assert _sql(loader, f'SELECT SUM("AMOUNT") FROM "{DB_SCHEMA}"."{table}"') == 200000
+    assert _sql(loader, f'SELECT COUNT(DISTINCT "ATM_NO") FROM "{DB_SCHEMA}"."{table}"') == 2
+    # the parquet PyArrow wrote is readable by Spark with the expected types
+    assert _sql(loader, f'SELECT COUNT(*) FROM "{DB_SCHEMA}"."{table}" '
+                        'WHERE "TRANSACTION_DATETIME" IS NOT NULL AND "DATE" IS NOT NULL') == 4

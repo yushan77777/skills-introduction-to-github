@@ -45,73 +45,80 @@ class SparkSerializationError(Exception):
     """
 
 
+#: The output schema, described once and built for both engines:
+#: :func:`build_schema` (Spark ``StructType``) and
+#: :func:`local_parser.arrow_schema` (PyArrow). Keeping one description means the
+#: parquet a batch produces is identical whichever engine wrote it.
+SCHEMA_FIELDS = [
+    ("ATM_NO", "string"),
+    ("TRANSACTION_DATETIME", "timestamp"),
+    ("DATE", "date"),
+    ("TIME", "string"),
+    ("RESPONSE_DATETIME", "timestamp"),
+    ("ACCOUNT_NO", "string"),
+    ("CARD_NO", "string"),
+    ("AMOUNT", "double"),
+    ("REQUESTED_AMOUNT", "double"),
+    ("CURRENCY", "string"),
+    ("STATUS", "string"),
+    ("RESPONSE_CODE", "string"),
+    ("ACTION_CODE", "string"),
+    ("TRANSACTION_REF", "string"),
+    ("AUX_SEQ", "string"),
+    ("TRACE_ID", "string"),
+    ("TERMINAL_ID", "string"),
+    ("CARD_SCHEME", "string"),
+    ("FAST_CASH", "boolean"),
+    ("DISPENSE_RESULT", "string"),
+    ("DISPENSED_AMOUNT", "double"),
+    ("DENOMINATION", "string"),
+    ("DENOM_BREAKDOWN", "string"),
+    ("NOTES_COUNT", "int"),
+    ("DENOM_AMOUNT", "double"),
+    ("DENOM_MATCHES_AMOUNT", "boolean"),
+    ("PLANNED_DENOMINATION", "string"),
+    ("MIX_NUMBER", "string"),
+    ("CASH_TAKEN", "boolean"),
+    ("TRX_ERROR", "string"),
+    ("ATTEMPT_NO", "int"),
+    ("ATTEMPT_COUNT", "int"),
+    ("IS_RETRY", "boolean"),
+    ("SESSION_ID", "string"),
+    ("TXN_SEQ", "int"),
+    ("PARSE_CONFIDENT", "boolean"),
+    ("RAW_BLOCK", "string"),
+    ("SOURCE_FILE", "string"),
+    ("SOURCE_PATH", "string"),
+    ("SOURCE_FILE_KEY", "string"),
+    ("SOURCE_LINE", "long"),
+    ("BATCH_ID", "string"),
+    ("ETL_RUN_ID", "string"),
+    ("ETL_NAME", "string"),
+    ("LOAD_TS", "timestamp"),
+]
+
+
 def build_schema():
-    """Fixed output schema (deferred import so the module loads without Spark)."""
+    """The output schema as a Spark ``StructType`` (deferred pyspark import)."""
     from pyspark.sql.types import (BooleanType, DateType, DoubleType, IntegerType,
                                    LongType, StringType, StructField, StructType,
                                    TimestampType)
 
-    return StructType([
-        StructField("ATM_NO", StringType(), True),
-        StructField("TRANSACTION_DATETIME", TimestampType(), True),
-        StructField("DATE", DateType(), True),
-        StructField("TIME", StringType(), True),
-        StructField("RESPONSE_DATETIME", TimestampType(), True),
-        StructField("ACCOUNT_NO", StringType(), True),
-        StructField("CARD_NO", StringType(), True),
-        StructField("AMOUNT", DoubleType(), True),
-        StructField("REQUESTED_AMOUNT", DoubleType(), True),
-        StructField("CURRENCY", StringType(), True),
-        StructField("STATUS", StringType(), True),
-        StructField("RESPONSE_CODE", StringType(), True),
-        StructField("ACTION_CODE", StringType(), True),
-        StructField("TRANSACTION_REF", StringType(), True),
-        StructField("AUX_SEQ", StringType(), True),
-        StructField("TRACE_ID", StringType(), True),
-        StructField("TERMINAL_ID", StringType(), True),
-        StructField("CARD_SCHEME", StringType(), True),
-        StructField("FAST_CASH", BooleanType(), True),
-        StructField("DISPENSE_RESULT", StringType(), True),
-        StructField("DISPENSED_AMOUNT", DoubleType(), True),
-        StructField("DENOMINATION", StringType(), True),
-        StructField("DENOM_BREAKDOWN", StringType(), True),
-        StructField("NOTES_COUNT", IntegerType(), True),
-        StructField("DENOM_AMOUNT", DoubleType(), True),
-        StructField("DENOM_MATCHES_AMOUNT", BooleanType(), True),
-        StructField("PLANNED_DENOMINATION", StringType(), True),
-        StructField("MIX_NUMBER", StringType(), True),
-        StructField("CASH_TAKEN", BooleanType(), True),
-        StructField("TRX_ERROR", StringType(), True),
-        StructField("ATTEMPT_NO", IntegerType(), True),
-        StructField("ATTEMPT_COUNT", IntegerType(), True),
-        StructField("IS_RETRY", BooleanType(), True),
-        StructField("SESSION_ID", StringType(), True),
-        StructField("TXN_SEQ", IntegerType(), True),
-        StructField("PARSE_CONFIDENT", BooleanType(), True),
-        StructField("RAW_BLOCK", StringType(), True),
-        StructField("SOURCE_FILE", StringType(), True),
-        StructField("SOURCE_PATH", StringType(), True),
-        StructField("SOURCE_FILE_KEY", StringType(), True),
-        StructField("SOURCE_LINE", LongType(), True),
-        StructField("BATCH_ID", StringType(), True),
-        StructField("ETL_RUN_ID", StringType(), True),
-        StructField("ETL_NAME", StringType(), True),
-        StructField("LOAD_TS", TimestampType(), True),
-    ])
+    spark_types = {
+        "string": StringType(),
+        "boolean": BooleanType(),
+        "int": IntegerType(),
+        "long": LongType(),
+        "double": DoubleType(),
+        "date": DateType(),
+        "timestamp": TimestampType(),
+    }
+    return StructType([StructField(name, spark_types[kind], True)
+                       for name, kind in SCHEMA_FIELDS])
 
 
 #: Column order of the rows produced by :func:`parse_journal_file`.
-COLUMN_ORDER = [
-    "ATM_NO", "TRANSACTION_DATETIME", "DATE", "TIME", "RESPONSE_DATETIME",
-    "ACCOUNT_NO", "CARD_NO", "AMOUNT", "REQUESTED_AMOUNT", "CURRENCY", "STATUS",
-    "RESPONSE_CODE", "ACTION_CODE", "TRANSACTION_REF", "AUX_SEQ", "TRACE_ID",
-    "TERMINAL_ID", "CARD_SCHEME", "FAST_CASH", "DISPENSE_RESULT", "DISPENSED_AMOUNT",
-    "DENOMINATION", "DENOM_BREAKDOWN", "NOTES_COUNT", "DENOM_AMOUNT",
-    "DENOM_MATCHES_AMOUNT", "PLANNED_DENOMINATION", "MIX_NUMBER", "CASH_TAKEN",
-    "TRX_ERROR", "ATTEMPT_NO", "ATTEMPT_COUNT", "IS_RETRY", "SESSION_ID", "TXN_SEQ",
-    "PARSE_CONFIDENT", "RAW_BLOCK", "SOURCE_FILE", "SOURCE_PATH", "SOURCE_FILE_KEY",
-    "SOURCE_LINE", "BATCH_ID", "ETL_RUN_ID", "ETL_NAME", "LOAD_TS",
-]
+COLUMN_ORDER = [name for name, _kind in SCHEMA_FIELDS]
 
 #: Parser counters aggregated across the batch (subset of ParseStats).
 STAT_KEYS = (

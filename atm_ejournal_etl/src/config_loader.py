@@ -217,6 +217,13 @@ class EtlConfig:
             raise ConfigError(f"[{self.etl_name}] greenplum.GREENPLUM_MERGE_KEYS is required for "
                               "the merge_by_key load strategy")
 
+        engine = str(self.get("parser.PARSE_ENGINE", "auto")).lower()
+        if engine not in {"auto", "local", "spark"}:
+            raise ConfigError(f"[{self.etl_name}] parser.PARSE_ENGINE must be auto, local or "
+                              f"spark, got {engine!r}")
+        if self.get_int("parser.PARSE_WRITE_CHUNK_RECORDS", 50000) < 1:
+            raise ConfigError(f"[{self.etl_name}] parser.PARSE_WRITE_CHUNK_RECORDS must be >= 1")
+
         key_mode = str(self.get("tracking.FILE_KEY_MODE", "path")).lower()
         if key_mode not in {"path", "path_size", "path_mtime"}:
             raise ConfigError(f"[{self.etl_name}] tracking.FILE_KEY_MODE must be one of "

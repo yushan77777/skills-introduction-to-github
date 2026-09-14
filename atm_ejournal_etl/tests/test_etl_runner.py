@@ -322,3 +322,130 @@ def test_parsed_columns_match_the_existing_parser_output(etl_home, spark):
     assert row["BATCH_ID"] == "BATCH_0001"
     assert row["ETL_RUN_ID"] == "RUN1"
     assert json.loads(row["DENOM_BREAKDOWN"]) == {"5000": 10}
+
+
+# --------------------------------------------------------------------------- #
+# Parse engines
+# --------------------------------------------------------------------------- #
+
+
+def test_local_engine_runs_without_sending_python_to_spark(etl_home, spark):
+    """
+    The engine for a PySpark that cannot serialise Python (e.g. Spark 3.1.3 on
+    Python 3.11): parsing happens here, Spark only reads the parquet and writes
+    to Greenplum.
+    """
+    pytest.importorskip("pyarrow", reason="pyarrow is not installed")
+    fixtures.build_input_tree(os.path.join(etl_home, "ATM_EJOURNALS"),
+                              atms=2, files_per_atm=1, transactions=2)
+    config_path = fixtures.write_config(etl_home, batch_size=1, parse_engine="local")
+
+    cfg = load_config(config_path, "atm_ejournal")
+    etl = AtmEjournalEtl(cfg, run_id="LOCAL1")
+    etl.loader = fixtures.FakeGreenplumLoader()
+    summary = etl.run()
+
+    assert etl.parse_engine == "local"
+    assert summary.status == "SUCCESS"
+    assert summary.batches_processed == 2
+    assert summary.records_processed == 4
+    assert summary.records_loaded == 4
+    assert len(_processed_rows(etl_home)) == 2
+    assert os.listdir(os.path.join(etl_home, "parquet")) == []      # cleaned up
+
+
+def test_both_engines_produce_the_same_rows(etl_home, spark, tmp_path):
+    """The local engine is a different route to the same parquet, not a different ETL."""
+    pytest.importorskip("pyarrow", reason="pyarrow is not installed")
+    fixtures.build_input_tree(os.path.join(etl_home, "ATM_EJOURNALS"),
+                              atms=2, files_per_atm=2, transactions=2)
+
+    def run_with(engine, run_id):
+        home = str(tmp_path / engine)
+        os.makedirs(home, exist_ok=True)
+        import shutil
+        shutil.copytree(os.path.join(etl_home, "ATM_EJOURNALS"),
+                        os.path.join(home, "ATM_EJOURNALS"), dirs_exist_ok=True)
+        config_path = fixtures.write_config(home, batch_size=2, parse_engine=engine)
+        etl = AtmEjournalEtl(load_config(config_path, "atm_ejournal"), run_id=run_id)
+        etl.loader = fixtures.FakeGreenplumLoader()
+        etl.run()
+        return etl.loader.rows
+
+    compared = ["ATM_NO", "TRANSACTION_DATETIME", "DATE", "TIME", "AMOUNT", "STATUS",
+                "DENOMINATION", "NOTES_COUNT", "DENOM_AMOUNT", "DENOM_MATCHES_AMOUNT",
+                "CARD_NO", "ACCOUNT_NO", "TRANSACTION_REF", "SOURCE_FILE", "SOURCE_LINE",
+                "DENOM_BREAKDOWN", "SESSION_ID"]
+
+    def normalise(rows):
+        return sorted(str({key: row[key] for key in compared}) for row in rows)
+
+    local_rows = run_with("local", "RL")
+    spark_rows = run_with("spark", "RS")
+
+    assert len(local_rows) == len(spark_rows) == 8
+    assert normalise(local_rows) == normalise(spark_rows)
+
+
+def test_auto_picks_local_when_python_cannot_be_shipped(etl_home, monkeypatch):
+    """The user's case: auto-selection keeps the ETL working on a broken install."""
+    pytest.importorskip("pyarrow", reason="pyarrow is not installed")
+    import check_environment
+
+    fixtures.build_input_tree(os.path.join(etl_home, "ATM_EJOURNALS"),
+                              atms=1, files_per_atm=1, transactions=1)
+    config_path = fixtures.write_config(etl_home, batch_size=1, parse_engine="auto")
+    monkeypatch.setattr(check_environment, "check_code_serialization",
+                        lambda: (False, "IndexError: tuple index out of range"))
+
+    etl = AtmEjournalEtl(load_config(config_path, "atm_ejournal"), run_id="AUTO1")
+    etl.loader = fixtures.FakeGreenplumLoader()
+    summary = etl.run()
+
+    assert etl.parse_engine == "local"
+    assert summary.status == "SUCCESS"
+    assert summary.records_loaded == 1
+
+
+def test_auto_picks_spark_when_python_can_be_shipped(etl_home, spark, monkeypatch):
+    import check_environment
+
+    fixtures.build_input_tree(os.path.join(etl_home, "ATM_EJOURNALS"),
+                              atms=1, files_per_atm=1, transactions=1)
+    config_path = fixtures.write_config(etl_home, batch_size=1, parse_engine="auto")
+    monkeypatch.setattr(check_environment, "check_code_serialization", lambda: (True, "ok"))
+
+    etl = AtmEjournalEtl(load_config(config_path, "atm_ejournal"), run_id="AUTO2")
+    etl.loader = fixtures.FakeGreenplumLoader()
+    summary = etl.run()
+
+    assert etl.parse_engine == "spark"
+    assert summary.status == "SUCCESS"
+
+
+def test_unknown_engine_is_rejected(etl_home):
+    """An invalid engine is a configuration error - the run never starts."""
+    from config_loader import ConfigError
+
+    fixtures.build_input_tree(os.path.join(etl_home, "ATM_EJOURNALS"),
+                              atms=1, files_per_atm=1, transactions=1)
+    config_path = fixtures.write_config(etl_home, batch_size=1, parse_engine="sideways")
+
+    with pytest.raises(ConfigError, match="PARSE_ENGINE must be auto, local or spark"):
+        load_config(config_path, "atm_ejournal")
+
+
+def test_local_engine_dry_run_needs_no_spark_session(etl_home):
+    """A dry run on the local engine never starts a Spark application at all."""
+    pytest.importorskip("pyarrow", reason="pyarrow is not installed")
+    fixtures.build_input_tree(os.path.join(etl_home, "ATM_EJOURNALS"),
+                              atms=1, files_per_atm=1, transactions=2)
+    config_path = fixtures.write_config(etl_home, batch_size=1, parse_engine="local")
+
+    etl = AtmEjournalEtl(load_config(config_path, "atm_ejournal"), run_id="DRY1", dry_run=True)
+    summary = etl.run()
+
+    assert summary.status == "SUCCESS"
+    assert etl.spark is None                           # no cluster application started
+    assert os.path.isdir(os.path.join(etl_home, "parquet", "batch_0001"))
+    assert _processed_rows(etl_home) == []

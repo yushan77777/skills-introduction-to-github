@@ -153,8 +153,11 @@ class AtmEjournalEtl:
             key_mode=str(cfg.get("tracking.FILE_KEY_MODE", "path")))
         self.pending = PendingBatchStore(cfg.path("tracking.PENDING_DIR", "processed/pending"))
         self.spark = None
-        self.parquet: Optional[ParquetStage] = None
+        # Usable before (and without) Spark: the local engine writes the parquet
+        # with PyArrow and only needs Spark for the Greenplum load.
+        self.parquet: Optional[ParquetStage] = ParquetStage(cfg, None)
         self.loader = None
+        self.parse_engine: Optional[str] = None
 
     # -- entry point -------------------------------------------------------- #
 
@@ -211,6 +214,8 @@ class AtmEjournalEtl:
                     self.cfg.get("greenplum.GREENPLUM_TABLE"),
                     self.cfg.get("greenplum.GREENPLUM_USER"))
         logger.info("load strategy   : %s", self.cfg.get("greenplum.GREENPLUM_LOAD_STRATEGY"))
+        logger.info("parse engine    : %s (parser.PARSE_ENGINE=%s)",
+                    self._engine(), self.cfg.get("parser.PARSE_ENGINE", "auto"))
         logger.info("dry run         : %s", self.dry_run)
         logger.debug("effective configuration (secrets masked): %s",
                      json.dumps(self.cfg.safe_dump(), indent=2, default=str))
@@ -233,8 +238,12 @@ class AtmEjournalEtl:
         self._environment_preflight()
         self._prepare_stage("spark_session")
         self.spark = build_spark_session(self.cfg)
-        ship_python_modules(self.spark)
-        self.parquet = ParquetStage(self.cfg, self.spark)
+        if self._engine() == "spark":
+            ship_python_modules(self.spark)
+        if self.parquet is None:
+            self.parquet = ParquetStage(self.cfg, self.spark)
+        else:
+            self.parquet.spark = self.spark
         self.parquet.ensure_root()
         return self.spark
 
@@ -248,6 +257,10 @@ class AtmEjournalEtl:
         PySpark job fails on it. Catching it here costs a millisecond and turns
         an opaque mid-batch stack trace into a message naming the remedy.
         """
+        if self._engine() != "spark":
+            # The local engine ships no Python code to Spark, so the check does
+            # not apply to it.
+            return
         if not self.cfg.get_bool("spark.SPARK_PRECHECK_ENABLED", True):
             logger.debug("environment preflight disabled (spark.SPARK_PRECHECK_ENABLED)")
             return
@@ -261,6 +274,43 @@ class AtmEjournalEtl:
             logger.error("environment preflight failed:\n%s", exc)
             raise EtlStageError(str(exc), stage="environment_check") from exc
         logger.debug("environment preflight passed")
+
+    def _engine(self) -> str:
+        """
+        Which parse engine this run uses - resolved once, then logged.
+
+        ``local``  parse on this host, write the parquet with PyArrow, use Spark
+                   only to read that parquet and write it to Greenplum (no Python
+                   code is ever sent to the executors).
+        ``spark``  parse on the executors with the existing distributed path.
+        ``auto``   use ``spark`` when this installation can serialise Python code
+                   for the executors, otherwise ``local``.
+        """
+        if self.parse_engine is not None:
+            return self.parse_engine
+
+        configured = str(self.cfg.get("parser.PARSE_ENGINE", "auto")).strip().lower()
+        if configured not in {"auto", "local", "spark"}:
+            raise EtlStageError(f"parser.PARSE_ENGINE must be auto, local or spark, got "
+                                f"{configured!r}", stage="startup")
+
+        if configured == "auto":
+            from check_environment import check_code_serialization             # noqa: PLC0415
+
+            can_ship, detail = check_code_serialization()
+            self.parse_engine = "spark" if can_ship else "local"
+            if can_ship:
+                logger.info("parse engine: spark (this installation can ship Python code to "
+                            "the executors)")
+            else:
+                logger.warning("parse engine: local - this installation cannot ship Python "
+                               "code to the executors (%s). Files are parsed on this host and "
+                               "written to parquet with PyArrow; Spark is used only for the "
+                               "Greenplum load, which stays inside the JVM.", detail)
+        else:
+            self.parse_engine = configured
+            logger.info("parse engine: %s (parser.PARSE_ENGINE)", self.parse_engine)
+        return self.parse_engine
 
     def _ensure_loader(self):
         if self.loader is None:
@@ -456,48 +506,29 @@ class AtmEjournalEtl:
 
     def _run_batch_stages(self, batch_id: str, batch: List[DiscoveredFile],
                           outcome: BatchOutcome) -> BatchOutcome:
-        from spark_parser import build_batch_dataframe                        # noqa: PLC0415
-        from spark_session import default_parse_partitions                    # noqa: PLC0415
-
-        self._ensure_spark()
+        self.summary.batch_id = batch_id
         assert self.parquet is not None
 
-        # ---- 1. parse ------------------------------------------------------ #
-        self._prepare_stage("spark_read")
-        self.summary.batch_id = batch_id
-        logger.info("reading text files | batch=%s | files=%d | partitions=%d",
-                    batch_id, len(batch), default_parse_partitions(self.cfg, len(batch)))
-        logger.info("transformations started | batch=%s", batch_id)
-        dataframe, stats_accumulator, failure_accumulator = build_batch_dataframe(
-            self.spark, batch, self.cfg, batch_id, self.run_id,
-            num_partitions=default_parse_partitions(self.cfg, len(batch)))
+        if self._engine() == "local":
+            parquet_path, record_count, stats, failures = self._parse_batch_locally(
+                batch_id, batch)
+        else:
+            parquet_path, record_count, stats, failures = self._parse_batch_on_spark(
+                batch_id, batch)
 
-        # ---- 2. parquet ---------------------------------------------------- #
-        self._prepare_stage("parquet_write")
-        self.parquet.prepare_for_batch(batch_id)
-        try:
-            parquet_path, record_count = self.parquet.write_batch(dataframe, batch_id)
-        except ParquetStageError as exc:
-            raise EtlStageError(str(exc), stage="parquet_write", batch_id=batch_id) from exc
         outcome.parquet_path = parquet_path
         outcome.records = record_count
         logger.info("transformations completed | batch=%s | records=%d", batch_id, record_count)
 
-        # Parser counters and per-file failures are now available (the parquet
-        # write was the action that ran the parse).
-        stats = dict(stats_accumulator.value or {})
         for key, value in stats.items():
             self.summary.parser_stats[key] = self.summary.parser_stats.get(key, 0) + value
         logger.info("parser counters | batch=%s | %s", batch_id, json.dumps(stats, sort_keys=True))
 
-        failures = list(failure_accumulator.value or [])
         failed_keys = {entry.get("file_key") for entry in failures}
         if failures:
             outcome.files_failed = len(failures)
             self.summary.files_failed += len(failures)
             for entry in failures:
-                logger.error("file failed to parse | batch=%s | file=%s\n%s",
-                             batch_id, entry.get("path"), entry.get("error"))
                 self.summary.failed_files.append({"batch_id": batch_id,
                                                   "path": str(entry.get("path")),
                                                   "error": str(entry.get("error"))[:500]})
@@ -518,7 +549,10 @@ class AtmEjournalEtl:
         self.pending.write(batch_id, self.run_id, loadable, parquet_path, record_count)
 
         # ---- 4. Greenplum load from the parquet, not from memory ----------- #
+        # Everything from here stays inside the JVM: spark.read.parquet and the
+        # JDBC write ship no Python code to the executors.
         self._prepare_stage("greenplum_load")
+        self._ensure_spark()
         loader = self._ensure_loader()
         parquet_dataframe = self.parquet.read_batch(parquet_path)
         logger.info("Greenplum load started | batch=%s | source=%s | expected rows=%d",
@@ -564,6 +598,71 @@ class AtmEjournalEtl:
         return outcome
 
     # -- finishing ---------------------------------------------------------- #
+
+    def _parse_batch_locally(self, batch_id: str, batch: List[DiscoveredFile]):
+        """
+        Parse the batch on this host and write the parquet with PyArrow.
+
+        No Python code reaches Spark on this path - it is the engine to use when
+        the PySpark installation cannot serialise Python for the executors.
+        """
+        from local_parser import (LocalParseError, count_parquet_rows,        # noqa: PLC0415
+                                  resolve_workers, write_batch_parquet)
+
+        self._prepare_stage("local_read")
+        assert self.parquet is not None
+        self.parquet.ensure_root()
+        parquet_path = self.parquet.prepare_for_batch(batch_id)
+        logger.info("reading text files | batch=%s | files=%d | engine=local | workers=%d",
+                    batch_id, len(batch), resolve_workers(self.cfg, len(batch)))
+        logger.info("transformations started | batch=%s", batch_id)
+
+        self._prepare_stage("parquet_write")
+        logger.info("parquet write started | batch=%s | path=%s", batch_id, parquet_path)
+        try:
+            result = write_batch_parquet(batch, self.cfg, batch_id, self.run_id, parquet_path)
+            record_count = count_parquet_rows(parquet_path)
+        except LocalParseError as exc:
+            raise EtlStageError(str(exc), stage="parquet_write", batch_id=batch_id) from exc
+        if record_count != result.record_count:
+            raise EtlStageError(
+                f"parquet validation failed for {batch_id}: {result.record_count} record(s) "
+                f"parsed, {record_count} in the parquet", stage="parquet_write",
+                batch_id=batch_id)
+        logger.info("parquet write completed | batch=%s | rows=%d | %.1fs",
+                    batch_id, record_count, result.duration_seconds)
+        return parquet_path, record_count, result.stats, result.failures
+
+    def _parse_batch_on_spark(self, batch_id: str, batch: List[DiscoveredFile]):
+        """Parse the batch on the executors (the distributed path)."""
+        from spark_parser import build_batch_dataframe                        # noqa: PLC0415
+        from spark_session import default_parse_partitions                    # noqa: PLC0415
+
+        self._ensure_spark()
+        assert self.parquet is not None
+
+        self._prepare_stage("spark_read")
+        partitions = default_parse_partitions(self.cfg, len(batch))
+        logger.info("reading text files | batch=%s | files=%d | engine=spark | partitions=%d",
+                    batch_id, len(batch), partitions)
+        logger.info("transformations started | batch=%s", batch_id)
+        dataframe, stats_accumulator, failure_accumulator = build_batch_dataframe(
+            self.spark, batch, self.cfg, batch_id, self.run_id, num_partitions=partitions)
+
+        self._prepare_stage("parquet_write")
+        self.parquet.prepare_for_batch(batch_id)
+        try:
+            parquet_path, record_count = self.parquet.write_batch(dataframe, batch_id)
+        except ParquetStageError as exc:
+            raise EtlStageError(str(exc), stage="parquet_write", batch_id=batch_id) from exc
+
+        # The counters and per-file failures are available now: the parquet write
+        # was the action that ran the parse.
+        failures = list(failure_accumulator.value or [])
+        for entry in failures:
+            logger.error("file failed to parse | batch=%s | file=%s\n%s",
+                         batch_id, entry.get("path"), entry.get("error"))
+        return parquet_path, record_count, dict(stats_accumulator.value or {}), failures
 
     def _record_failure(self, exc: Exception, stage: str, batch_id: Optional[str] = None) -> None:
         self.summary.status = "FAILED"

@@ -176,6 +176,9 @@ defaults:
     GREENPLUM_TARGET_DISTRIBUTED_BY: ""
     GREENPLUM_CONTROL_DISTRIBUTED_BY: ""
   parser:
+    PARSE_ENGINE: "{parse_engine}"
+    PARSE_WORKERS: 1
+    PARSE_WRITE_CHUNK_RECORDS: 1000
     KEEP_LAST_FAILURE: true
     LINK_FAILED_ACROSS_AMOUNTS: false
     RETRY_WINDOW_SECONDS: 180
@@ -215,14 +218,16 @@ etls:
 """
 
 
-def write_config(base_dir: str, batch_size: int = 2, extra_yaml: str = "") -> str:
+def write_config(base_dir: str, batch_size: int = 2, extra_yaml: str = "",
+                 parse_engine: str = "spark") -> str:
     """
     Write a complete test configuration and return its path.
 
     ``extra_yaml`` is appended verbatim, which is how a test overrides a single
     section (for example a different ``PARQUET_CLEANUP_ENABLED``).
     """
-    text = CONFIG_TEMPLATE.format(base_dir=base_dir, batch_size=batch_size) + extra_yaml
+    text = CONFIG_TEMPLATE.format(base_dir=base_dir, batch_size=batch_size,
+                                  parse_engine=parse_engine) + extra_yaml
 
     # The JVM is started once per pytest process and its classpath cannot change
     # afterwards, so when the database integration suite is enabled every session

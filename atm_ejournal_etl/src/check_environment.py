@@ -18,15 +18,19 @@ read that interpreter's byte code, and the job dies on the driver with::
     _pickle.PicklingError: Could not serialize object:
         IndexError: tuple index out of range
 
-Nothing in the ETL (or in any PySpark job) can work around it - even
-``sc.parallelize([1, 2]).map(lambda x: x + 1)`` fails. The remedy is to install a
-PySpark that supports the interpreter, ideally the version the cluster runs:
+No PySpark job that sends Python code can work around it - even
+``sc.parallelize([1, 2]).map(lambda x: x + 1)`` fails. **The ETL can still run**:
+with ``parser.PARSE_ENGINE: local`` (the automatic choice when this check fails)
+the journals are parsed on the ETL host and written to parquet with PyArrow, and
+Spark is used only for ``spark.read.parquet`` and the JDBC write - both of which
+stay inside the JVM.
+
+To parse on the executors instead, install a PySpark that supports the
+interpreter, ideally the version the cluster runs:
 
     Python 3.11  ->  pyspark >= 3.4
     Python 3.12  ->  pyspark >= 3.5
     Python 3.13  ->  pyspark >= 4.0
-
-``pip install "pyspark==<the cluster's Spark version>"`` in the ETL virtualenv.
 """
 
 from __future__ import annotations
@@ -85,6 +89,11 @@ def describe_environment() -> Dict[str, Any]:
         facts["cloudpickle_version"] = getattr(cloudpickle, "__version__", "unknown")
     except Exception:                                  # noqa: BLE001
         pass
+    try:
+        import pyarrow                                 # noqa: PLC0415
+        facts["pyarrow_version"] = pyarrow.__version__
+    except Exception:                                  # noqa: BLE001
+        facts["pyarrow_version"] = None
     return facts
 
 
@@ -189,11 +198,16 @@ def describe_serialization_failure(exc: Optional[BaseException] = None) -> str:
             "ships Python code fails the same way - including "
             "sc.parallelize([1, 2]).map(lambda x: x + 1).",
             "",
-            "Remedy (in the ETL virtualenv), pick the PySpark that matches the cluster:",
+            "The ETL runs on this installation with the local parse engine:",
+            "    parser.PARSE_ENGINE: local     (or 'auto', which selects it by itself)",
+            "The journals are then parsed on this host and written to parquet with PyArrow, "
+            "and Spark is used only to read that parquet and write it to Greenplum over JDBC "
+            "- no Python code is sent to the executors. Install PyArrow if it is missing:",
+            "    pip install pyarrow",
+            "",
+            "To parse on the executors instead, install a PySpark that matches the cluster:",
             f"    pip install \"pyspark>={minimum[0]}.{minimum[1]}\"        "
             "# e.g. pyspark==4.0.0 for a Spark 4.0 cluster",
-            "or run the ETL with an interpreter this PySpark supports (Python 3.10 or older "
-            "for PySpark 3.3).",
         ]
     else:
         lines += [
@@ -255,7 +269,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("environment")
     print("-" * 70)
     for key in ("python_version", "python_executable", "pyspark_version", "pyspark_path",
-                "cloudpickle_version", "java_version", "spark_home"):
+                "cloudpickle_version", "pyarrow_version", "java_version", "spark_home"):
         print(f"  {key:<20} {facts.get(key)}")
     if facts.get("pyspark_error"):
         print(f"  {'pyspark_error':<20} {facts['pyspark_error']}")
@@ -278,10 +292,21 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     ok, detail = check_code_serialization()
     if ok:
-        print("  OK    Python code can be serialised for the executors")
+        print("  OK    Python code can be serialised for the executors "
+              "(parser.PARSE_ENGINE: spark or auto)")
     else:
         failures += 1
         print(f"  FAIL  Python code cannot be serialised: {detail}")
+        print("        -> the ETL will use the local parse engine "
+              "(parser.PARSE_ENGINE: auto/local)")
+
+    if facts.get("pyarrow_version"):
+        print(f"  OK    PyArrow {facts['pyarrow_version']} is available for the local engine")
+    else:
+        print("  WARN  PyArrow is not installed - the local parse engine needs it "
+              "(pip install pyarrow)")
+        if not ok:
+            failures += 1
 
     if options.spark:
         ok, detail = _spark_round_trip()
@@ -292,7 +317,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if failures:
         print(describe_serialization_failure())
         return 1
-    print("environment looks fine for the ETL")
+    print("environment looks fine for the ETL (both parse engines are available)")
     return 0
 
 

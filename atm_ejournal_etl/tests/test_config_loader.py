@@ -74,6 +74,18 @@ def test_invalid_load_strategy_rejected(config_path):
                     overrides={"greenplum.GREENPLUM_LOAD_STRATEGY": "upsert_maybe"})
 
 
+def test_invalid_parse_engine_rejected(config_path):
+    with pytest.raises(ConfigError, match="PARSE_ENGINE"):
+        load_config(config_path, "atm_ejournal",
+                    overrides={"parser.PARSE_ENGINE": "sideways"})
+
+
+def test_invalid_write_chunk_rejected(config_path):
+    with pytest.raises(ConfigError, match="PARSE_WRITE_CHUNK_RECORDS"):
+        load_config(config_path, "atm_ejournal",
+                    overrides={"parser.PARSE_WRITE_CHUNK_RECORDS": 0})
+
+
 def test_invalid_file_key_mode_rejected(config_path):
     with pytest.raises(ConfigError, match="FILE_KEY_MODE"):
         load_config(config_path, "atm_ejournal",

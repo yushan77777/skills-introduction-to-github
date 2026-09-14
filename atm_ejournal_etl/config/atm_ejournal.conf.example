@@ -3,6 +3,10 @@
 # Copy to config/atm_ejournal.conf, replace the url/user/password/driver, the
 # paths and the table names, and restrict the file (chmod 600) - the Greenplum
 # and SMTP passwords are stored in clear text.
+#
+# On a PySpark that cannot ship Python code to the executors (e.g. Spark 3.1.3
+# with Python 3.11) leave parser.PARSE_ENGINE at "auto": the ETL then parses
+# locally and uses Spark only for the Greenplum load.
 # =============================================================================
 # =============================================================================
 # ATM E-Journal ETL - central configuration
@@ -101,6 +105,10 @@ defaults:
     SPARK_EXECUTOR_JAVA_OPTIONS: "-Djava.io.tmpdir=/opt/spark/tmp/ -Doracle.jdbc.timezoneAsRegion=false -Duser.timezone=UTC"
     SPARK_DRIVER_JAVA_OPTIONS: "-Djava.io.tmpdir=/opt/spark/tmp/ -Doracle.jdbc.timezoneAsRegion=false -Duser.timezone=UTC"
     SPARK_LOG_LEVEL: "WARN"
+    # Verify that this Python/PySpark installation can ship Python code to the
+    # executors before a cluster application is started. Costs milliseconds and
+    # turns a mid-batch PicklingError into a message naming the remedy.
+    SPARK_PRECHECK_ENABLED: true
     # Parse tasks per batch. 0 = one task per (SPARK_EXECUTOR_INSTANCES x
     # SPARK_EXECUTOR_CORES) slot; files are distributed, never read on driver.
     SPARK_PARSE_PARTITIONS: 0
@@ -148,6 +156,21 @@ defaults:
     GREENPLUM_CONTROL_DISTRIBUTED_BY: "batch_id"
 
   parser:
+    # Where the journal files are parsed:
+    #   local  - on this host, written to parquet with PyArrow. NO Python code is
+    #            sent to Spark, so it works on any PySpark/Python combination
+    #            (e.g. Spark 3.1.3 with Python 3.11). Spark is still used for the
+    #            Greenplum load, which stays inside the JVM.
+    #   spark  - parsed on the executors (needs a PySpark that supports this
+    #            Python: 3.11 -> pyspark >= 3.4).
+    #   auto   - spark when this installation can ship Python code, else local.
+    PARSE_ENGINE: "auto"
+    # Local engine: parallel parser processes (0 = one per CPU core).
+    PARSE_WORKERS: 0
+    # Local engine: records buffered before a parquet row group is written, so a
+    # batch never has to fit in memory.
+    PARSE_WRITE_CHUNK_RECORDS: 50000
+
     # Forwarded unchanged to atm_ejournal_parser.deduplicate_attempts().
     KEEP_LAST_FAILURE: true
     LINK_FAILED_ACROSS_AMOUNTS: false
