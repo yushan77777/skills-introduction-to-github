@@ -26,6 +26,7 @@ are new journal grammar, and they keep every column the ETL already loads:
 | --- | --- |
 | iWallet cash withdrawals | `-iWallet Cash Withdraw` - a cardless wallet withdrawal, emitted as an ordinary withdrawal row with `TRANSACTION_TYPE = IWALLET_WITHDRAWAL` |
 | Bill payment deposits | cash accepted and paid to a biller (`Cardless BillPayment - Biller Verification`), emitted as a deposit row with `DEPOSIT_TYPE = BILL_PAYMENT` |
+| Credit card payments | the same flow settling a card (`Cardless Credit Card Payment - Card Verification`), `DEPOSIT_TYPE = CREDIT_CARD_PAYMENT`, the card in `CARD_NO` |
 | Rejected cash deposits | notes refused and re-inserted in one session: only the **final** accepted breakdown is the deposit, never the sum of the attempts |
 | Amount vs. denomination | `AMOUNT_SOURCE`, `DENOM_AMOUNT_DIFF` and `DENOM_MATCHES_AMOUNT` on every row; amounts logged in minor units are rescaled only when the notes confirm the scale |
 
@@ -38,6 +39,7 @@ are new journal grammar, and they keep every column the ETL already loads:
 | `config/atm_ejournal.conf` | Central configuration (YAML). One section per concern, one profile per ETL |
 | `config/atm_ejournal.conf.example` | The same file with dummy values only |
 | `src/atm_ejournal_parser.py` | The parser: withdrawals (card, fast cash, iWallet) and deposits (card, cardless, bill payment) |
+| `sql/greenplum_tables.sql` | `CREATE TABLE` for the withdrawal, deposit and batch control tables, for a DBA who creates them instead of the ETL |
 | `src/config_loader.py` | Loads/validates a configuration profile |
 | `src/check_environment.py` | Preflight: can this Python/PySpark ship code to the executors? |
 | `src/log_manager.py` | Run log, per-batch logs, retention / size sweep |

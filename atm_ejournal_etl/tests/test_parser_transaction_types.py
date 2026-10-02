@@ -254,6 +254,135 @@ def test_a_verified_bill_payment_that_is_never_confirmed_is_still_reported(tmp_p
 
 
 # --------------------------------------------------------------------------- #
+# Credit card payment: the same flow with a card in place of the biller
+# --------------------------------------------------------------------------- #
+
+
+CARD_PAYMENT = [
+    ("171200", "Entered Mobile No: 0758994275"),
+    *cash_in("171210", "005000-000002:001000-000003"),
+    ("171215", "-Cardless Credit Card Payment - Card Verification"),
+    ("171215", "----Card No             : 413541******1241"),
+    ("171215", "----AUX NO : 701 :xx:A000011120260801171215-01"),
+    ("171215", "-----Function Status    : True"),
+    ("171215", "-----Trace ID           : 370011"),
+    ("171218", "-Ending Cash In Process---------------"),
+    ("171220", "-Ending Cash In Succeeded"),
+    ("171222", "-Cardless Credit Card Payment Confirm Request"),
+    ("171222", "----AUX NO : 702 :xx:A000011120260801171222-02"),
+    ("171222", "---Cardless Credit Card Payment Confirm Completed"),
+    ("171222", "-----Function Status    : True"),
+    ("171222", "-----Trace ID           : 370025"),
+    ("171222", "-----Ret Referenece No  : CC00123"),
+    ("171223", "-Print Command Executed --------------"),
+    ("171223", "----Reciept Type : CARDLESS_CREDIT_CARD_PAYMENT"),
+    ("171230", "---Terminal ID         : A0000111"),
+    ("171231", "-Close Session -----------------------"),
+    ("171231", "#SESSION-END#"),
+]
+
+
+@pytest.fixture
+def card_payment_row(tmp_path):
+    path = write_journal(str(tmp_path / "ATM999" / "EJ_CARD_PAY.TXT"), CARD_PAYMENT)
+    frame = process_single_deposit_file(path, atm_no="ATM999")
+    assert len(frame) == 1
+    return frame.iloc[0]
+
+
+def test_a_credit_card_payment_is_its_own_deposit_type(card_payment_row):
+    assert card_payment_row["DEPOSIT_TYPE"] == "CREDIT_CARD_PAYMENT"
+    assert card_payment_row["STATUS"] == "SUCCESS"
+    assert card_payment_row["RECEIPT_TYPE"] == "CARDLESS_CREDIT_CARD_PAYMENT"
+    assert card_payment_row["MOBILE_NO"] == "0758994275"
+    assert card_payment_row["TRACE_ID"] == "370025"
+    assert card_payment_row["BILL_REFERENCE_NO"] == "CC00123"
+
+
+def test_the_settled_card_is_captured(card_payment_row):
+    assert card_payment_row["CARD_NO"] == "413541******1241"
+    assert card_payment_row["ACCOUNT_MASKED"] == "413541******1241"
+
+
+def test_the_cash_accepted_is_the_card_payment_amount(card_payment_row):
+    assert card_payment_row["AMOUNT"] == 13000.0          # 5000x2 + 1000x3
+    assert card_payment_row["AMOUNT_SOURCE"] == "DENOMINATION"
+    assert card_payment_row["DENOMINATION"] == "5000x2 + 1000x3"
+    assert card_payment_row["NOTES_COUNT"] == 5
+    assert bool(card_payment_row["DENOM_MATCHES_AMOUNT"]) is True
+
+
+def test_a_shorter_firmware_wording_is_still_recognised(tmp_path):
+    """No "Cardless" prefix, no "Request" suffix - the role is what matters."""
+    lines = [(stamp, msg.replace("Cardless Credit Card Payment - Card Verification",
+                                 "Credit Card Payment Verification")
+                       .replace("Cardless Credit Card Payment Confirm Request",
+                                "CreditCard Payment Confirm")
+                       .replace("Cardless Credit Card Payment Confirm Completed",
+                                "CreditCard Payment Confirmation Succeeded"))
+             for stamp, msg in CARD_PAYMENT]
+    path = write_journal(str(tmp_path / "ATM999" / "EJ_CARD_PAY2.TXT"), lines)
+
+    row = process_single_deposit_file(path, atm_no="ATM999").iloc[0]
+
+    assert row["DEPOSIT_TYPE"] == "CREDIT_CARD_PAYMENT"
+    assert row["STATUS"] == "SUCCESS"
+    assert row["AMOUNT"] == 13000.0
+
+
+def test_an_amount_logged_by_the_payment_leg_is_used_and_reconciled(tmp_path):
+    """When the leg does log an amount, it is the amount - cents and all."""
+    lines = list(CARD_PAYMENT)
+    position = lines.index(("171222", "----AUX NO : 702 :xx:A000011120260801171222-02"))
+    lines.insert(position, ("171222", "-----Amount : 1300000"))
+    path = write_journal(str(tmp_path / "ATM999" / "EJ_CARD_PAY3.TXT"), lines)
+
+    row = process_single_deposit_file(path, atm_no="ATM999").iloc[0]
+
+    assert row["AMOUNT"] == 13000.0
+    assert row["AMOUNT_RAW"] == 1300000.0
+    assert row["AMOUNT_SOURCE"] == "REQUEST_SCALED"
+    assert row["DENOM_AMOUNT_DIFF"] == 0.0
+
+
+def test_a_declined_credit_card_payment_keeps_the_cash_on_the_row(tmp_path):
+    lines = [(stamp, msg.replace("Confirm Completed", "Confirm Failed")
+                       .replace("Function Status    : True", "Function Status    : False"))
+             for stamp, msg in CARD_PAYMENT]
+    path = write_journal(str(tmp_path / "ATM999" / "EJ_CARD_PAY_NG.TXT"), lines)
+
+    row = process_single_deposit_file(path, atm_no="ATM999").iloc[0]
+
+    assert row["DEPOSIT_TYPE"] == "CREDIT_CARD_PAYMENT"
+    assert row["STATUS"] == "FAILED"
+    assert row["DENOM_AMOUNT"] == 13000.0
+
+
+def test_a_credit_card_bill_payment_is_a_card_payment_not_a_bill(tmp_path):
+    """Wording that matches both families resolves to the more specific one."""
+    lines = [(stamp, msg.replace("Cardless Credit Card Payment", "Credit Card Bill Payment"))
+             for stamp, msg in CARD_PAYMENT]
+    path = write_journal(str(tmp_path / "ATM999" / "EJ_CC_BILL.TXT"), lines)
+
+    row = process_single_deposit_file(path, atm_no="ATM999").iloc[0]
+
+    assert row["DEPOSIT_TYPE"] == "CREDIT_CARD_PAYMENT"
+
+
+def test_both_payment_types_and_a_deposit_coexist_in_one_file(tmp_path):
+    lines = (BILL_PAYMENT + CARD_PAYMENT)
+    path = write_journal(str(tmp_path / "ATM999" / "EJ_MIXED.TXT"), lines)
+
+    frame = process_single_deposit_file(path, atm_no="ATM999")
+
+    assert list(frame["DEPOSIT_TYPE"]) == ["BILL_PAYMENT", "CREDIT_CARD_PAYMENT"]
+    assert list(frame["AMOUNT"]) == [1900.0, 13000.0]   # no shared escrow
+    stats = frame.attrs["stats"]
+    assert stats["bill_payment_records_detected"] == 1
+    assert stats["credit_card_payment_records_detected"] == 1
+
+
+# --------------------------------------------------------------------------- #
 # Rejected cash deposit: the final accepted breakdown only
 # --------------------------------------------------------------------------- #
 

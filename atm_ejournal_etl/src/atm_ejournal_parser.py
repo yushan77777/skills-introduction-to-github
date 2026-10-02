@@ -80,6 +80,13 @@ Deposit pass (:func:`process_all_atms_deposits`, DEPOSIT_TYPE):
     BILL_PAYMENT          cash accepted and paid to a biller instead of an
                           account ("Cardless BillPayment - Biller Verification"
                           + "Cardless Bill Payment Confirm Request")
+    CREDIT_CARD_PAYMENT   the same, settling a credit card ("Cardless Credit
+                          Card Payment - Card Verification" + "... Confirm
+                          Request"); the card is in CARD_NO / ACCOUNT_MASKED
+
+A session that took cash but never credited it (cancelled, declined, rolled
+back) is reported with STATUS = NO_DEPOSIT and the notes it held, because cash
+in the machine with no credit is what reconciliation has to see.
 
 Amount vs. denomination
 -----------------------
@@ -1564,8 +1571,8 @@ def process_single_file(path: str,
 #   cash was rolled back. Those rows are kept with STATUS = NO_DEPOSIT because
 #   cash-in-without-credit is exactly what reconciliation needs to see.
 #
-# Bill payment deposits
-# ---------------------
+# Bill payment and credit card payment deposits
+# ---------------------------------------------
 # A cardless bill payment takes cash exactly like a deposit, but credits a
 # biller instead of an account, so it has no "Cash Deposit Request" block:
 #
@@ -1586,6 +1593,12 @@ def process_single_file(path: str,
 # It is emitted as an ordinary deposit row with DEPOSIT_TYPE = BILL_PAYMENT.
 # No amount is logged anywhere in the bill payment legs, so the notes accepted
 # *are* the amount (AMOUNT_SOURCE = DENOMINATION).
+#
+# A credit card payment is the same flow with the card in place of the biller
+# ("Cardless Credit Card Payment - Card Verification" / "... Confirm Request")
+# and is emitted with DEPOSIT_TYPE = CREDIT_CARD_PAYMENT, the card it settles in
+# CARD_NO / ACCOUNT_MASKED. Both are recognised by their role in the family
+# rather than one literal string each - see :data:`PAYMENT_FAMILIES`.
 #
 # Rejected notes inside one session
 # ---------------------------------
@@ -1679,26 +1692,81 @@ REFUSE_RE = re.compile(r"Refuse\s+Items\s+Found", re.I)
 REASON_RE = re.compile(r"^Reason\s*:\s*(?P<val>.+)$", re.I)
 RECEIPT_TYPE_RE = re.compile(r"^Rec(?:ei|ie)pt\s*Type\s*:\s*(?P<val>\S+)", re.I)
 
-# --- bill payment (cash accepted, biller credited) ------------------------- #
-#: "Cardless BillPayment - Biller Verification" (the firmware writes
-#: "BillPayment" without the space here and with it everywhere else).
-BILL_VERIFY_RE = re.compile(
-    r"^(Cardless\s+)?Bill\s*Payment\s*-\s*Biller\s+Verification", re.I)
-#: "Cardless Bill Payment Confirm Request" - the anchor the row is built on.
-BILL_CONFIRM_RE = re.compile(
-    r"^(Cardless\s+)?Bill\s*Payment\s+Confirm\s+Request", re.I)
-BILL_CONFIRM_OK_RE = re.compile(
-    r"^(Cardless\s+)?Bill\s*Payment\s+Confirm\s+Completed", re.I)
-BILL_CONFIRM_FAIL_RE = re.compile(
-    r"^(Cardless\s+)?Bill\s*Payment\s+Confirm\s+(Fail|Failed|Rejected|Declined)", re.I)
+# --- cash payments: bill payment, credit card payment ---------------------- #
+#
+# These take cash exactly like a deposit but credit something other than an
+# account, and they share one shape:
+#
+#     -Cardless BillPayment - Biller Verification        <- who is being paid
+#     -Cardless Bill Payment Confirm Request             <- the record anchor
+#     ---Cardless Bill Payment Confirm Completed         <- the terminator
+#     -----Function Status    : True                     <- after the terminator
+#
+#     -Cardless Credit Card Payment - Card Verification
+#     -Cardless Credit Card Payment Confirm Request
+#     ---Cardless Credit Card Payment Confirm Completed
+#
+# So the legs are recognised by *role* (verification / confirm / terminator)
+# within a family, rather than by one literal string per firmware wording: the
+# word order, the "Cardless" prefix and the spacing of "BillPayment" all vary
+# between versions, and a new payment type is one entry below.
+#
+#: (DEPOSIT_TYPE, the words that name the family). The most specific pattern
+#: comes first: a credit card bill payment matches both.
+PAYMENT_FAMILIES = (
+    ("CREDIT_CARD_PAYMENT",
+     re.compile(r"Credit\s*Card\s*(Payment|Settlement|Repayment|Bill)", re.I)),
+    ("BILL_PAYMENT", re.compile(r"Bill\s*Payment", re.I)),
+)
+#: The three roles a line can play inside a family.
+PAYMENT_DONE_RE = re.compile(
+    r"Confirm(?:ation)?\s+(Completed|Succeeded|Successful|Success|OK|"
+    r"Fail|Failed|Rejected|Declined|NG)", re.I)
+PAYMENT_FAILED_RE = re.compile(
+    r"Confirm(?:ation)?\s+(Fail|Failed|Rejected|Declined|NG)", re.I)
+PAYMENT_CONFIRM_RE = re.compile(r"Confirm(?:ation)?(\s+Request)?\s*$", re.I)
+PAYMENT_VERIFY_RE = re.compile(r"Verification|Validation|Enquiry|Inquiry", re.I)
+
 #: ``Biller Data(ID/DESC) : CEB Only/CEB Only`` - the brackets keep this line
 #: out of FIELD_RE, so it has its own pattern.
 BILLER_DATA_RE = re.compile(
     r"^Biller\s*Data\s*(?:\([^)]*\))?\s*:\s*(?P<val>.+)$", re.I)
 
-#: Lines scanned after a bill payment terminator for its host fields
+#: Lines scanned after a payment terminator for its host fields
 #: (Function Status / Trace ID / Ret Referenece No are printed after it).
-BILL_TRAILING_LINES = 10
+PAYMENT_TRAILING_LINES = 10
+
+#: Where the credited card/account of a payment is logged.
+PAYMENT_TARGET_KEYS = ("card no", "card number", "credit card no", "credit card number",
+                       "to card", "card", "account no", "account number", "reference no",
+                       "bill no", "customer ref", "customer reference")
+
+
+def payment_role(msg: str) -> tuple:
+    """
+    ``(DEPOSIT_TYPE, role)`` for a cash-payment line, else ``(None, None)``.
+
+    ``role`` is ``"verify"`` (who is being paid), ``"confirm"`` (the request the
+    record is built on) or ``"done"`` (its terminator).
+    """
+    if not msg:
+        return None, None
+    for payment_type, pattern in PAYMENT_FAMILIES:
+        if not pattern.search(msg):
+            continue
+        if PAYMENT_DONE_RE.search(msg):
+            return payment_type, "done"
+        if PAYMENT_CONFIRM_RE.search(msg):
+            return payment_type, "confirm"
+        if PAYMENT_VERIFY_RE.search(msg):
+            return payment_type, "verify"
+        return payment_type, None
+    return None, None
+
+
+def is_payment_boundary(msg: str) -> bool:
+    """True for a payment line that closes the block being read."""
+    return payment_role(msg)[1] in {"verify", "confirm"}
 
 #: Where a cash-in note breakdown stops (the deposit block layout differs from
 #: the dispenser's, so the withdrawal stop-list would run past the end).
@@ -1730,6 +1798,7 @@ class DepositParseStats:
     validations_seen: int = 0
     deposit_records_detected: int = 0
     bill_payment_records_detected: int = 0
+    credit_card_payment_records_detected: int = 0
     cash_in_events: int = 0
     superseded_cash_in_snapshots: int = 0
     successful_deposits: int = 0
@@ -1759,7 +1828,7 @@ class DepositContext:
     terminal_id: Optional[str] = None
     currency: Optional[str] = None
     validation: Dict[str, Any] = field(default_factory=dict)
-    bill_payment: Dict[str, Any] = field(default_factory=dict)
+    payment: Dict[str, Any] = field(default_factory=dict)
     cash_in: Dict[str, Any] = field(default_factory=dict)
     deposit_seq: int = 0
     implicit: bool = False
@@ -2083,13 +2152,16 @@ def parse_deposit(buffer: List[LogLine],
     return record
 
 
-def parse_bill_verification(buffer: List[LogLine], start: int) -> Dict[str, Any]:
+def parse_payment_verification(buffer: List[LogLine], start: int,
+                               payment_type: str = "BILL_PAYMENT") -> Dict[str, Any]:
     """
-    Read a 'Cardless BillPayment - Biller Verification' block.
+    Read a payment verification block ("... - Biller Verification",
+    "... - Card Verification").
 
-    This is where the biller is identified, so it plays the same role for a bill
-    payment that :func:`parse_validation` plays for a cardless deposit: it is
-    held on the session and merged into the record the confirm request produces.
+    This is where the thing being paid is identified - a biller, or the credit
+    card the cash settles - so it plays the same role for a payment that
+    :func:`parse_validation` plays for a cardless deposit: it is held on the
+    session and merged into the record the confirm request produces.
     """
     biller_id: Optional[str] = None
     biller_name: Optional[str] = None
@@ -2101,7 +2173,7 @@ def parse_bill_verification(buffer: List[LogLine], start: int) -> Dict[str, Any]
         msg = buffer[index].msg
         if not msg:
             continue
-        if (BILL_CONFIRM_RE.match(msg) or DEPOSIT_START_RE.match(msg)
+        if (is_payment_boundary(msg) or DEPOSIT_START_RE.match(msg)
                 or CLOSE_SESSION_RE.search(msg) or CREATE_SESSION_RE.match(msg)
                 or CASH_IN_OK_RE.match(msg)):
             break
@@ -2121,9 +2193,12 @@ def parse_bill_verification(buffer: List[LogLine], start: int) -> Dict[str, Any]
             fields[parsed[0]] = parsed[1]
 
     return {
+        "payment_type": payment_type,
         "datetime": buffer[start].timestamp,
         "biller_id": biller_id,
         "biller_name": biller_name,
+        "target": next((fields[key] for key in PAYMENT_TARGET_KEYS
+                        if (fields.get(key) or "").strip()), None),
         "function_status": (fields.get("function status") or "").strip() or None,
         "trace_id": (fields.get("trace id") or "").strip() or None,
         "ref": aux_no,
@@ -2131,29 +2206,37 @@ def parse_bill_verification(buffer: List[LogLine], start: int) -> Dict[str, Any]
     }
 
 
-def parse_bill_payment(buffer: List[LogLine],
+def parse_cash_payment(buffer: List[LogLine],
                        start: int,
                        session: DepositContext,
                        source_file: str,
-                       stats: DepositParseStats) -> Dict[str, Any]:
+                       stats: DepositParseStats,
+                       payment_type: str = "BILL_PAYMENT") -> Dict[str, Any]:
     """
-    Parse one 'Bill Payment Confirm Request' into a deposit-shaped record.
+    Parse one payment confirm request into a deposit-shaped record.
 
-    A bill payment is a cash deposit whose credit goes to a biller, so it is
-    emitted into the deposit DataFrame with DEPOSIT_TYPE = BILL_PAYMENT and the
+    A bill payment and a credit card payment are both cash deposits whose credit
+    goes somewhere other than an account, so they are emitted into the deposit
+    DataFrame with DEPOSIT_TYPE = BILL_PAYMENT / CREDIT_CARD_PAYMENT and the
     same columns every other deposit row uses.
 
-    Two things differ from a deposit request and are handled here:
+    Three things differ from a deposit request and are handled here:
 
-    * the legs log **no amount at all**, so the notes the CDM accepted are the
-      amount (AMOUNT_SOURCE = DENOMINATION);
+    * these legs often log **no amount at all**, so the notes the CDM accepted
+      are the amount (AMOUNT_SOURCE = DENOMINATION); when an amount *is* logged
+      it is used and reconciled against the notes like any other;
     * the outcome is a boolean ``Function Status : True`` instead of
       ``Status : OK``, and it is printed *after* the terminator, so the trailing
-      lines are scanned as well.
+      lines are scanned as well;
+    * what is credited is a biller or a card, not an account, so it is reported
+      in BILLER_ID / BILLER_NAME and CARD_NO / ACCOUNT_MASKED.
     """
     header = buffer[start]
     stats.deposit_records_detected += 1
-    stats.bill_payment_records_detected += 1
+    if payment_type == "CREDIT_CARD_PAYMENT":
+        stats.credit_card_payment_records_detected += 1
+    else:
+        stats.bill_payment_records_detected += 1
     session.deposit_seq += 1
 
     fields: Dict[str, str] = {}
@@ -2168,15 +2251,13 @@ def parse_bill_payment(buffer: List[LogLine],
         msg = buffer[index].msg
         if not msg:
             continue
-        if BILL_CONFIRM_FAIL_RE.match(msg):
-            terminator, terminator_failed, end_index = msg, True, index
-            break
-        if BILL_CONFIRM_OK_RE.match(msg):
+        if payment_role(msg)[1] == "done":
             terminator, end_index = msg, index
+            terminator_failed = bool(PAYMENT_FAILED_RE.search(msg))
             break
-        if (BILL_CONFIRM_RE.match(msg) or BILL_VERIFY_RE.match(msg)
-                or DEPOSIT_START_RE.match(msg) or CLOSE_SESSION_RE.search(msg)
-                or CREATE_SESSION_RE.match(msg) or SESSION_START_RE.search(msg)):
+        if (is_payment_boundary(msg) or DEPOSIT_START_RE.match(msg)
+                or CLOSE_SESSION_RE.search(msg) or CREATE_SESSION_RE.match(msg)
+                or SESSION_START_RE.search(msg)):
             end_index = index - 1
             break
 
@@ -2194,13 +2275,12 @@ def parse_bill_payment(buffer: List[LogLine],
     receipt_type: Optional[str] = None
     trx_error: Optional[str] = None
     for index in range(end_index + 1,
-                       min(len(buffer), end_index + 1 + BILL_TRAILING_LINES)):
+                       min(len(buffer), end_index + 1 + PAYMENT_TRAILING_LINES)):
         msg = buffer[index].msg
         if not msg:
             continue
-        if (BILL_CONFIRM_RE.match(msg) or BILL_VERIFY_RE.match(msg)
-                or DEPOSIT_START_RE.match(msg) or CLOSE_SESSION_RE.search(msg)
-                or CREATE_SESSION_RE.match(msg)):
+        if (is_payment_boundary(msg) or DEPOSIT_START_RE.match(msg)
+                or CLOSE_SESSION_RE.search(msg) or CREATE_SESSION_RE.match(msg)):
             break
         receipt = RECEIPT_TYPE_RE.match(msg)
         if receipt and receipt_type is None:
@@ -2218,15 +2298,27 @@ def parse_bill_payment(buffer: List[LogLine],
         if parsed and (parsed[0] not in fields or not fields[parsed[0]]):
             fields[parsed[0]] = parsed[1]
 
-    verification = session.bill_payment or {}
+    verification = session.payment or {}
+    payment_type = verification.get("payment_type") or payment_type
 
-    # The notes accepted are the amount - and only the final accepted
-    # breakdown, exactly as for a rejected cash deposit.
-    denom_counts, cash_in_attempts = select_final_denominations(session.cash_in)
+    # Only the final accepted breakdown, exactly as for a rejected deposit.
+    raw_amount = next((value for value in (
+        _to_number(fields.get(key)) for key in ("amount", "payment amount", "trx amount",
+                                                "total amount")) if value is not None), None)
+    denom_counts, cash_in_attempts = select_final_denominations(
+        session.cash_in, candidate_amounts=(raw_amount, _deposit_amount(raw_amount)))
     if cash_in_attempts > 1:
         stats.superseded_cash_in_snapshots += cash_in_attempts - 1
     denom_amount = denomination_value(denom_counts)
-    amount, amount_source = reconcile_amount(None, denom_amount)
+    # No amount logged (the usual case): the notes accepted are the amount.
+    amount, amount_source = reconcile_amount(raw_amount, denom_amount, minor_units=True)
+    if amount_source == "REQUEST_SCALED":
+        stats.amount_scale_corrections += 1
+    if denom_counts and not amounts_agree(denom_amount, amount):
+        stats.denomination_amount_mismatches += 1
+        logger.warning("%s: %s amount %s does not match the notes accepted %s (%s)",
+                       session.session_id, payment_type, amount, denom_amount,
+                       format_denomination(denom_counts))
 
     status_field = _function_status(fields.get("function status")
                                     or verification.get("function_status"))
@@ -2244,19 +2336,26 @@ def parse_bill_payment(buffer: List[LogLine],
     else:
         stats.unknown_status_deposits += 1
 
+    target = (next((fields[key] for key in PAYMENT_TARGET_KEYS
+                    if (fields.get(key) or "").strip()), None)
+              or verification.get("target"))
+
     record = {
         "ATM_NO": None,                       # filled in by the folder wrapper
         "TRANSACTION_DATETIME": header.timestamp,
-        "DEPOSIT_TYPE": "BILL_PAYMENT",
+        "DEPOSIT_TYPE": payment_type,
         "ACCOUNT_NO": session.entered_account,
-        "ACCOUNT_MASKED": None,
+        # What the cash was paid into: a credit card for a card payment, a bill
+        # reference for a biller. Masked as the journal masks it.
+        "ACCOUNT_MASKED": target,
         "ACCOUNT_TYPE": None,
         "CUSTOMER_NAME": (session.validation or {}).get("customer_name"),
         "MOBILE_NO": session.mobile_no,
         "NIC_NO": session.nic_no,
-        "CARD_NO": session.card_no,
+        "CARD_NO": session.card_no or (target if payment_type == "CREDIT_CARD_PAYMENT"
+                                       else None),
         "AMOUNT": amount,
-        "AMOUNT_RAW": None,                   # the legs log no amount at all
+        "AMOUNT_RAW": raw_amount,
         "AMOUNT_SOURCE": amount_source,
         "CURRENCY": session.cash_in.get("currency") or session.currency,
         "STATUS": status,
@@ -2323,7 +2422,7 @@ def _abandoned_record(session: DepositContext,
     what reconciliation has to see.
     """
     validation = session.validation or {}
-    bill = session.bill_payment or {}
+    bill = session.payment or {}
     cash_in = session.cash_in or {}
     denom_counts, attempts = select_final_denominations(cash_in)
     if not (validation or bill or denom_counts):
@@ -2338,7 +2437,7 @@ def _abandoned_record(session: DepositContext,
         "ATM_NO": None,
         "TRANSACTION_DATETIME": (validation.get("datetime") or bill.get("datetime")
                                  or cash_in.get("datetime") or session.opened_at),
-        "DEPOSIT_TYPE": "BILL_PAYMENT" if bill else "CARDLESS",
+        "DEPOSIT_TYPE": bill.get("payment_type", "BILL_PAYMENT") if bill else "CARDLESS",
         "ACCOUNT_NO": validation.get("customer_account") or session.entered_account,
         "ACCOUNT_MASKED": None,
         "ACCOUNT_TYPE": None,
@@ -2536,18 +2635,18 @@ def extract_deposit_blocks(lines: Iterable[LogLine],
         if parsed and session is not None and parsed[0] in {"currency id", "currency"}:
             session.cash_in.setdefault("currency", parsed[1] or None)
 
-        # ---- bill payment: biller verification (the anchor's context) -------
-        if BILL_VERIFY_RE.match(msg):
+        # ---- cash payments: bill payment / credit card payment --------------
+        payment_type, role = payment_role(msg)
+        if role == "verify":
             if session is None:
                 session = open_session(line, implicit=True)
-            session.bill_payment = parse_bill_verification(buffer, index)
+            session.payment = parse_payment_verification(buffer, index, payment_type)
             continue
-
-        # ---- bill payment: confirm request (the record) ----------------------
-        if BILL_CONFIRM_RE.match(msg):
+        if role == "confirm":
             if session is None:
                 session = open_session(line, implicit=True)
-            records.append(parse_bill_payment(buffer, index, session, source_file, stats))
+            records.append(parse_cash_payment(buffer, index, session, source_file, stats,
+                                              payment_type=payment_type))
             _consume_cash_in(session)
             continue
 
@@ -2575,7 +2674,7 @@ def _consume_cash_in(session: DepositContext) -> None:
     """
     session.cash_in = {key: value for key, value in (session.cash_in or {}).items()
                        if key in {"currency"}}
-    session.bill_payment = {}
+    session.payment = {}
 
 
 # --------------------------------------------------------------------------- #
