@@ -15,11 +15,19 @@ Input files
     -> next batch
 ```
 
-The parsing logic is unchanged: `src/atm_ejournal_parser.py` is the module that was
-already in use (grammar, retry collapsing, denominations, audit counters - see
-[`docs/PARSER_README.md`](docs/PARSER_README.md)). What is new is everything around it:
-batching, tracking, parquet staging, Greenplum loading, configuration, logging with
-retention, Airflow orchestration and notifications.
+The ETL around the parser - batching, tracking, parquet staging, Greenplum loading,
+configuration, logging with retention, Airflow orchestration and notifications - is
+what this project adds. `src/atm_ejournal_parser.py` stays the single home of the
+parsing logic (grammar, retry collapsing, denominations, audit counters - see
+[`docs/PARSER_README.md`](docs/PARSER_README.md)); the only changes ever made to it
+are new journal grammar, and they keep every column the ETL already loads:
+
+| Added | What it covers |
+| --- | --- |
+| iWallet cash withdrawals | `-iWallet Cash Withdraw` - a cardless wallet withdrawal, emitted as an ordinary withdrawal row with `TRANSACTION_TYPE = IWALLET_WITHDRAWAL` |
+| Bill payment deposits | cash accepted and paid to a biller (`Cardless BillPayment - Biller Verification`), emitted as a deposit row with `DEPOSIT_TYPE = BILL_PAYMENT` |
+| Rejected cash deposits | notes refused and re-inserted in one session: only the **final** accepted breakdown is the deposit, never the sum of the attempts |
+| Amount vs. denomination | `AMOUNT_SOURCE`, `DENOM_AMOUNT_DIFF` and `DENOM_MATCHES_AMOUNT` on every row; amounts logged in minor units are rescaled only when the notes confirm the scale |
 
 ---
 
@@ -29,7 +37,7 @@ retention, Airflow orchestration and notifications.
 | --- | --- |
 | `config/atm_ejournal.conf` | Central configuration (YAML). One section per concern, one profile per ETL |
 | `config/atm_ejournal.conf.example` | The same file with dummy values only |
-| `src/atm_ejournal_parser.py` | **Existing** parser, unchanged |
+| `src/atm_ejournal_parser.py` | The parser: withdrawals (card, fast cash, iWallet) and deposits (card, cardless, bill payment) |
 | `src/config_loader.py` | Loads/validates a configuration profile |
 | `src/check_environment.py` | Preflight: can this Python/PySpark ship code to the executors? |
 | `src/log_manager.py` | Run log, per-batch logs, retention / size sweep |
