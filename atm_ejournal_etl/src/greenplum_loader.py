@@ -116,6 +116,66 @@ def sql_literal(value: Optional[str]) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+PASSWORD_IN_TEXT_RE = re.compile(r"(password\s*[=:]\s*)(\S+)", re.I)
+
+
+def redact(text: str) -> str:
+    """Never let a credential reach a log line or an exception message."""
+    return PASSWORD_IN_TEXT_RE.sub(r"\1***", str(text))
+
+
+def message_from_text(text: Any) -> str:
+    """
+    The useful line of an exception's text.
+
+    ``str(Py4JJavaError)`` starts with ``An error occurred while calling
+    o61.execute.`` and carries the real cause on the next line, prefixed with
+    ``:`` - that is the line worth logging, not the first one.
+    """
+    lines = [line.strip() for line in str(text).strip().splitlines() if line.strip()]
+    for line in lines:
+        if line.startswith(":"):
+            return line.lstrip(":").strip()
+    return lines[0] if lines else ""
+
+
+def database_message(exc: BaseException) -> str:
+    """
+    What the database actually said about a failed statement.
+
+    ``psycopg2`` puts the server's message in the exception itself, but a JDBC
+    failure arrives through py4j as ``Py4JJavaError: An error occurred while
+    calling o61.execute.`` - the part that matters (``must be owner of relation
+    ...``) sits in the Java exception and its cause chain. Unwrap that chain so
+    a refused statement says *why* it was refused.
+    """
+    messages: List[str] = []
+    java_exception = getattr(exc, "java_exception", None)
+    for _hop in range(6):                              # cause chains are short; never loop
+        if java_exception is None:
+            break
+        try:
+            text = java_exception.getMessage()
+        except Exception:                              # noqa: BLE001 - not a Java throwable
+            break
+        if text:
+            text = message_from_text(text)
+            if text and text not in messages:
+                messages.append(text)
+        following = None
+        for accessor in ("getNextException", "getCause"):
+            try:
+                following = getattr(java_exception, accessor)()
+            except Exception:                          # noqa: BLE001 - not a SQLException
+                following = None
+            if following is not None:
+                break
+        java_exception = following
+    if messages:
+        return redact(" | ".join(messages))
+    return redact(message_from_text(exc)) or type(exc).__name__
+
+
 def parse_jdbc_url(url: str) -> Tuple[str, int, str]:
     """``jdbc:postgresql://host:5432/db`` -> ``("host", 5432, "db")``."""
     match = JDBC_URL_RE.match(str(url).strip())
@@ -165,8 +225,8 @@ class ControlConnection:
                 return cls(connection, "psycopg2")
             except Exception as exc:                   # noqa: BLE001 - password never echoed
                 raise GreenplumLoadError(
-                    f"could not connect to Greenplum {host}:{port}/{database} as {user} "
-                    f"({type(exc).__name__})") from None
+                    f"could not connect to Greenplum {host}:{port}/{database} as {user}: "
+                    f"{database_message(exc)}") from None
 
         if spark is None:
             raise GreenplumLoadError("psycopg2 is not installed and no SparkSession is "
@@ -183,7 +243,7 @@ class ControlConnection:
         except Exception as exc:                       # noqa: BLE001
             raise GreenplumLoadError(
                 f"could not open a JDBC control connection to {host}:{port}/{database} "
-                f"({type(exc).__name__})") from None
+                f"as {user}: {database_message(exc)}") from None
 
     def execute(self, sql: str) -> int:
         """Run a statement and return the affected row count (-1 when unknown)."""
@@ -268,6 +328,8 @@ class GreenplumLoader:
         self.control_distributed_by = str(cfg.get("greenplum.GREENPLUM_CONTROL_DISTRIBUTED_BY", ""))
 
         self._objects_ready = False
+        #: The database's own explanation of the last DDL that failed.
+        self.last_ddl_error = ""
 
     # -- naming ------------------------------------------------------------- #
 
@@ -357,7 +419,7 @@ class GreenplumLoader:
             writer.mode(mode).save()
         except Exception as exc:                       # noqa: BLE001
             raise GreenplumLoadError(f"{self.write_format} write into {self.dbtable(table)} "
-                                     f"failed: {exc}") from exc
+                                     f"failed: {database_message(exc)}") from exc
         elapsed = time.time() - started
         logger.info("Greenplum write completed | table=%s | %.1fs", self.dbtable(table), elapsed)
         return elapsed
@@ -366,9 +428,24 @@ class GreenplumLoader:
 
     def ensure_objects(self, schema=None, connection: Optional[ControlConnection] = None) -> None:
         """
-        Create the control table (and the target table, from the parquet schema)
-        when they do not exist. Disabled with ``GREENPLUM_CREATE_OBJECTS: false``
-        for sites where DDL is applied by a DBA.
+        Create or extend the objects the load needs.
+
+        Each step runs in its own transaction and is reported on its own, so one
+        piece of DDL that the account is not allowed to run cannot take the whole
+        batch down:
+
+        * the **control table** is bookkeeping - if it cannot be created the run
+          continues without it and recovery falls back to counting rows in the
+          target table;
+        * the **target table** is created only when it does not exist, and that
+          failing *is* fatal - nothing can be inserted into a table that is not
+          there;
+        * **missing columns** are added to an existing target table; when the
+          account may not ALTER it, the exact statements a DBA has to run are
+          logged and the batch carries on (the insert will then say which column
+          is missing).
+
+        Disabled entirely with ``GREENPLUM_CREATE_OBJECTS: false``.
         """
         if self._objects_ready or not self.create_objects:
             return
@@ -376,21 +453,107 @@ class GreenplumLoader:
         connection = connection or self.connect()
         try:
             if self.use_control_table:
-                connection.execute(self._control_table_ddl())
+                if not self._run_ddl(connection, self._control_table_ddl(), "batch control table"):
+                    self.use_control_table = False
+                    logger.warning("continuing without the batch control table (%s) - the data "
+                                   "is still loaded, and a restart falls back to counting the "
+                                   "batch's rows in %s",
+                                   self.last_ddl_error or "see the error above", self.target_table)
+
             if schema is not None:
-                connection.execute(self._target_table_ddl(schema))
-                self.align_table_columns(connection, schema, self.table)
-            connection.commit()
+                if self.table_exists(connection, self.table):
+                    self._align_or_report(connection, schema)
+                elif not self._run_ddl(connection, self._target_table_ddl(schema),
+                                       "target table"):
+                    raise GreenplumLoadError(
+                        f"the target table {self.target_table} does not exist and could not "
+                        f"be created as {self.user}: {self.last_ddl_error} - create it by "
+                        f"hand, or set greenplum.GREENPLUM_CREATE_OBJECTS: false and have a "
+                        f"DBA create it")
+
             self._objects_ready = True
             logger.info("Greenplum objects verified | target=%s | control=%s",
                         self.target_table,
                         self.control_table if self.use_control_table else "(disabled)")
-        except Exception as exc:                       # noqa: BLE001
-            connection.rollback()
-            raise GreenplumLoadError(f"could not create/verify Greenplum objects: {exc}") from exc
         finally:
             if owned:
                 connection.close()
+
+    def _run_ddl(self, connection: ControlConnection, statement: str, what: str,
+                 quiet: bool = False) -> bool:
+        """
+        Run one DDL statement in its own transaction.
+
+        Returns False when it fails, leaving the database's own explanation in
+        :attr:`last_ddl_error` - a DDL error otherwise arrives as one truncated
+        line at the end of a batch report, which says nothing about which
+        statement the account was not allowed to run. ``quiet`` suppresses the
+        per-statement log line for callers that summarise many statements at
+        once (adding 47 missing columns must not produce 47 error blocks).
+        """
+        try:
+            connection.execute(statement)
+            connection.commit()
+            self.last_ddl_error = ""
+            return True
+        except Exception as exc:                       # noqa: BLE001 - reported, not raised
+            connection.rollback()
+            self.last_ddl_error = database_message(exc)
+            if not quiet:
+                logger.error("%s could not be created/altered as %s: %s\n    %s",
+                             what, self.user, self.last_ddl_error, statement)
+            return False
+
+    def table_exists(self, connection: ControlConnection, table: str) -> bool:
+        """Does ``schema.table`` exist and is it visible to this account?"""
+        found = connection.scalar(
+            "SELECT COUNT(*) FROM information_schema.tables "
+            f"WHERE table_schema = {sql_literal(self.schema)} "
+            f"AND table_name = {sql_literal(table)}")
+        return bool(found)
+
+    def missing_columns(self, connection: ControlConnection, schema, table: str) -> List[Tuple[str, str]]:
+        """``[(column, sql type)]`` the batch has and the table does not."""
+        present = set(self.existing_columns(connection, table))
+        if not present:
+            return []
+        return [(field_.name, TYPE_MAP.get(type(field_.dataType).__name__, "text"))
+                for field_ in schema.fields if field_.name not in present]
+
+    def alter_statements(self, missing: List[Tuple[str, str]], table: Optional[str] = None) -> List[str]:
+        """The ALTER TABLE statements that would add the missing columns."""
+        qualified = self.qualified(table or self.table)
+        return [f"ALTER TABLE {qualified} ADD COLUMN {quote_identifier(name)} {column_type};"
+                for name, column_type in missing]
+
+    def _align_or_report(self, connection: ControlConnection, schema) -> List[str]:
+        """Add the missing columns, or say exactly what a DBA has to run."""
+        missing = self.missing_columns(connection, schema, self.table)
+        if not missing:
+            return []
+        added, refused, reason = [], [], ""
+        for name, column_type in missing:
+            statement = (f"ALTER TABLE {self.target_table} "
+                         f"ADD COLUMN {quote_identifier(name)} {column_type}")
+            if self._run_ddl(connection, statement, f"column {name}", quiet=True):
+                added.append(name)
+            else:
+                # Every column is still attempted - one that fails for its own
+                # reason must not stop the others - but the refusals are
+                # reported once, at the end, instead of one block each.
+                refused.append((name, column_type))
+                reason = reason or self.last_ddl_error
+        if added:
+            logger.warning("added %d missing column(s) to %s: %s",
+                           len(added), self.target_table, ", ".join(added))
+        if refused:
+            logger.error("%d column(s) the batch writes could not be added to %s as %s: %s\n"
+                         "  the insert fails until they exist - run these as the table's "
+                         "owner:\n%s",
+                         len(refused), self.target_table, self.user,
+                         reason or "see the error above",
+                         "\n".join("    " + line for line in self.alter_statements(refused)))
+        return added
 
     def _control_table_ddl(self) -> str:
         distribution = (f" DISTRIBUTED BY ({quote_identifier(self.control_distributed_by)})"
@@ -449,22 +612,18 @@ class GreenplumLoader:
         Add the columns the batch has and the table does not.
 
         Purely additive - nothing is dropped, renamed or retyped - so a table
-        loaded by an earlier version (before the bill-wise NOTES_<value> columns,
-        say) accepts the new batches instead of failing the insert. Returns the
-        column names that were added.
+        written by an earlier version (before the bill-wise ``NOTES_<value>``
+        columns, say) accepts the new batches instead of failing the insert.
+        Returns the column names that were added.
         """
-        existing = self.existing_columns(connection, table)
-        if not existing:
-            return []                                   # the CREATE above made it
-        present = set(existing)
+        missing = self.missing_columns(connection, schema, table)
+        if not missing:
+            return []
         added = []
-        for field_ in schema.fields:
-            if field_.name in present:
-                continue
-            column_type = TYPE_MAP.get(type(field_.dataType).__name__, "text")
+        for name, column_type in missing:
             connection.execute(f"ALTER TABLE {self.qualified(table)} "
-                               f"ADD COLUMN {quote_identifier(field_.name)} {column_type}")
-            added.append(field_.name)
+                               f"ADD COLUMN {quote_identifier(name)} {column_type}")
+            added.append(name)
         if added:
             logger.warning("added %d missing column(s) to %s: %s",
                            len(added), self.qualified(table), ", ".join(added))
@@ -592,22 +751,46 @@ class GreenplumLoader:
             connection.close()
 
     def _delete_previous_attempt(self, run_id: str, batch_id: str) -> int:
-        """Remove rows a previous attempt of this exact batch already wrote."""
+        """
+        Remove rows a previous attempt of this exact batch already wrote.
+
+        The rows are counted first, and the DELETE only runs when there are any:
+        the common case - a batch loading for the first time - then needs no
+        DELETE right at all, which is what an account with SELECT and INSERT
+        only can offer. When rows *are* there and they cannot be removed, the
+        batch stops: appending on top of them would duplicate the batch.
+        """
         connection = None
+        existing = 0
+        where = (f'WHERE "ETL_RUN_ID" = {sql_literal(run_id)} '
+                 f'AND "BATCH_ID" = {sql_literal(batch_id)}')
         try:
             connection = self.connect()
-            deleted = connection.execute(
-                f"DELETE FROM {self.target_table} WHERE "
-                f'"ETL_RUN_ID" = {sql_literal(run_id)} AND "BATCH_ID" = {sql_literal(batch_id)}')
+            try:
+                existing = int(connection.scalar(
+                    f"SELECT COUNT(*) FROM {self.target_table} {where}") or 0)
+            except Exception as exc:                   # noqa: BLE001 - the write reports it
+                logger.debug("could not count an earlier attempt of %s: %s",
+                             batch_id, database_message(exc))
+                return 0
+            if not existing:
+                return 0
+            deleted = connection.execute(f"DELETE FROM {self.target_table} {where}")
             connection.commit()
-            if deleted > 0:
-                logger.warning("Greenplum load | batch=%s | %d row(s) from an earlier attempt of "
-                               "this batch removed before the append", batch_id, deleted)
+            logger.warning("Greenplum load | batch=%s | %d row(s) from an earlier attempt of "
+                           "this batch removed before the append", batch_id, max(deleted, 0))
             return max(deleted, 0)
         except GreenplumLoadError as exc:
             logger.warning("could not clean an earlier attempt of %s before appending: %s",
                            batch_id, exc)
             return 0
+        except Exception as exc:                       # noqa: BLE001 - re-raised with the reason
+            if connection is not None:
+                connection.rollback()
+            raise GreenplumLoadError(
+                f"{existing} row(s) of an earlier attempt of {batch_id} are in "
+                f"{self.target_table} and could not be removed as {self.user}: "
+                f"{database_message(exc)} - appending now would load the batch twice") from exc
         finally:
             if connection is not None:
                 connection.close()
@@ -641,7 +824,8 @@ class GreenplumLoader:
             # The data is in the target table; the batch is still recoverable
             # from the ETL_RUN_ID/BATCH_ID columns, so this is a warning.
             logger.warning("batch control row could not be written for %s (%s) - recovery will "
-                           "fall back to counting rows in the target table", batch_id, exc)
+                           "fall back to counting rows in the target table", batch_id,
+                           database_message(exc))
         finally:
             if connection is not None:
                 connection.close()
@@ -658,7 +842,7 @@ class GreenplumLoader:
                 f'"ETL_RUN_ID" = {sql_literal(run_id)} AND "BATCH_ID" = {sql_literal(batch_id)}')
             return int(value or 0)
         except Exception as exc:                       # noqa: BLE001 - verification only
-            logger.warning("could not verify loaded rows for %s: %s", batch_id, exc)
+            logger.warning("could not verify loaded rows for %s: %s", batch_id, database_message(exc))
             return -1
         finally:
             if connection is not None:
@@ -686,7 +870,8 @@ class GreenplumLoader:
                 f'"ETL_RUN_ID" = {sql_literal(run_id)} AND "BATCH_ID" = {sql_literal(batch_id)}')
             return int(rows) if rows else None
         except Exception as exc:                       # noqa: BLE001
-            logger.error("could not check whether batch %s committed: %s", batch_id, exc)
+            logger.error("could not check whether batch %s committed: %s", batch_id,
+                         database_message(exc))
             raise GreenplumLoadError("Greenplum could not be queried; refusing to guess whether "
                                      "the batch committed") from exc
         finally:
@@ -719,7 +904,7 @@ class GreenplumLoader:
             finally:
                 statement.close()
         except Exception as exc:                       # noqa: BLE001
-            logger.warning("could not check loaded source files: %s", exc)
+            logger.warning("could not check loaded source files: %s", database_message(exc))
             return []
         finally:
             if connection is not None:

@@ -437,3 +437,216 @@ def test_a_missing_table_is_left_to_the_create(loader, monkeypatch):
 
     assert loader.align_table_columns(connection, FakeDataFrame().schema, loader.table) == []
     assert connection.statements == []
+
+
+# --------------------------------------------------------------------------- #
+# ensure_objects: one step at a time, and only a missing target table is fatal
+# --------------------------------------------------------------------------- #
+
+
+class DdlConnection(RecordingConnection):
+    """
+    A control connection that knows which tables exist and refuses the DDL
+    matching ``refuse`` the way a database refuses it: with a message.
+    """
+
+    def __init__(self, existing=(), refuse=None, message="ERROR: must be owner of relation"):
+        super().__init__()
+        self.existing = list(existing)
+        self.refuse = refuse
+        self.message = message
+
+    def execute(self, sql):
+        if self.refuse and self.refuse in sql:
+            raise RuntimeError(self.message)
+        self.statements.append(sql)
+        return 1
+
+    def scalar(self, sql):
+        self.statements.append(sql)
+        if "information_schema.tables" in sql:
+            return 1 if any(f"'{table}'" in sql for table in self.existing) else 0
+        return 0
+
+
+def _ddl(connection):
+    return [sql for sql in connection.statements if sql.startswith(("CREATE", "ALTER"))]
+
+
+def test_a_refused_control_table_does_not_stop_the_load(loader, monkeypatch, caplog):
+    """Bookkeeping is not the data - the batch still loads without it."""
+    columns = [field.name for field in FakeDataFrame().schema.fields]
+    connection = DdlConnection(existing=[loader.table], refuse="atm_ejournal_batch_control",
+                              message="ERROR: permission denied for schema atm")
+    monkeypatch.setattr(loader, "existing_columns", lambda conn, table: columns)
+
+    with caplog.at_level(logging.INFO):
+        loader.ensure_objects(FakeDataFrame().schema, connection=connection)
+
+    assert loader.use_control_table is False           # disabled, not fatal
+    assert loader._objects_ready is True                             # noqa: SLF001
+    assert "permission denied for schema atm" in caplog.text
+    assert "continuing without the batch control table" in caplog.text
+    assert "restart falls back to counting" in caplog.text
+
+
+def test_a_refused_target_table_is_fatal_and_says_why(loader, monkeypatch):
+    """Nothing can be inserted into a table that is not there."""
+    connection = DdlConnection(existing=[], refuse=f'CREATE TABLE IF NOT EXISTS "atm"."{loader.table}"',
+                               message="ERROR: permission denied for schema atm")
+    monkeypatch.setattr(loader, "existing_columns", lambda conn, table: [])
+
+    with pytest.raises(GreenplumLoadError) as failure:
+        loader.ensure_objects(FakeDataFrame().schema, connection=connection)
+
+    assert "permission denied for schema atm" in str(failure.value)
+    assert "GREENPLUM_CREATE_OBJECTS: false" in str(failure.value)
+
+
+def test_refused_columns_are_reported_once_with_the_statements(loader, monkeypatch, caplog):
+    """47 missing columns must produce one error block, not 47."""
+    connection = DdlConnection(existing=[loader.table, loader.control], refuse="ADD COLUMN")
+    monkeypatch.setattr(loader, "existing_columns", lambda conn, table: ["ATM_NO", "AMOUNT"])
+
+    with caplog.at_level(logging.INFO):
+        loader.ensure_objects(FakeDataFrame().schema, connection=connection)
+
+    errors = [record for record in caplog.records if record.levelno >= logging.ERROR]
+    assert len(errors) == 1                            # one block for all three columns
+    text = errors[0].getMessage()
+    assert "3 column(s) the batch writes could not be added" in text
+    assert "must be owner of relation" in text         # the database's own words
+    for column in ("SOURCE_FILE_KEY", "BATCH_ID", "ETL_RUN_ID"):
+        assert f'ADD COLUMN "{column}" text;' in text
+    assert loader._objects_ready is True                             # noqa: SLF001
+
+
+def test_the_columns_that_can_be_added_still_are(loader, monkeypatch, caplog):
+    connection = DdlConnection(existing=[loader.table, loader.control],
+                               refuse='ADD COLUMN "BATCH_ID"')
+    monkeypatch.setattr(loader, "existing_columns", lambda conn, table: ["ATM_NO", "AMOUNT"])
+
+    with caplog.at_level(logging.INFO):
+        loader.ensure_objects(FakeDataFrame().schema, connection=connection)
+
+    added = " | ".join(_ddl(connection))
+    assert '"SOURCE_FILE_KEY"' in added and '"ETL_RUN_ID"' in added
+    assert "added 2 missing column(s)" in caplog.text
+    assert "1 column(s) the batch writes could not be added" in caplog.text
+
+
+def test_an_existing_table_is_never_recreated(loader, monkeypatch, caplog):
+    columns = [field.name for field in FakeDataFrame().schema.fields]
+    connection = DdlConnection(existing=[loader.table, loader.control])
+    monkeypatch.setattr(loader, "existing_columns", lambda conn, table: columns)
+
+    with caplog.at_level(logging.INFO):
+        loader.ensure_objects(FakeDataFrame().schema, connection=connection)
+
+    assert [sql for sql in _ddl(connection) if loader.table in sql] == []
+    assert loader.use_control_table is True
+    assert "Greenplum objects verified" in caplog.text
+
+
+def test_objects_are_verified_only_once(loader, monkeypatch):
+    columns = [field.name for field in FakeDataFrame().schema.fields]
+    connection = DdlConnection(existing=[loader.table, loader.control])
+    monkeypatch.setattr(loader, "existing_columns", lambda conn, table: columns)
+
+    loader.ensure_objects(FakeDataFrame().schema, connection=connection)
+    statements = len(connection.statements)
+    loader.ensure_objects(FakeDataFrame().schema, connection=connection)
+
+    assert len(connection.statements) == statements
+
+
+# --------------------------------------------------------------------------- #
+# What the database actually said
+# --------------------------------------------------------------------------- #
+
+
+class FakeJavaException:
+    """A java.sql.SQLException as py4j hands it over."""
+
+    def __init__(self, message, nxt=None, cause=None):
+        self._message = message
+        self._next = nxt
+        self._cause = cause
+
+    def getMessage(self):
+        return self._message
+
+    def getNextException(self):
+        return self._next
+
+    def getCause(self):
+        return self._cause
+
+
+class FakePy4JJavaError(Exception):
+    def __init__(self, java_exception):
+        super().__init__("An error occurred while calling o61.execute.\n"
+                         ": org.postgresql.util.PSQLException: ERROR: must be owner of relation\n"
+                         "\tat org.postgresql.core.v3.QueryExecutorImpl.receiveErrorResponse")
+        self.java_exception = java_exception
+
+
+def test_a_jdbc_error_is_unwrapped_to_the_database_message():
+    from greenplum_loader import database_message
+
+    exc = FakePy4JJavaError(FakeJavaException(
+        "ERROR: must be owner of relation owned_target",
+        nxt=FakeJavaException("ERROR: current transaction is aborted")))
+
+    message = database_message(exc)
+
+    assert "must be owner of relation owned_target" in message
+    assert "current transaction is aborted" in message
+    assert "o61.execute" not in message                 # the useless wrapper is gone
+
+
+def test_an_error_without_a_java_side_falls_back_to_its_text():
+    from greenplum_loader import database_message
+
+    assert database_message(RuntimeError("ERROR: relation does not exist")) == \
+        "ERROR: relation does not exist"
+
+
+def test_a_py4j_error_without_a_reachable_java_exception_uses_the_caused_by_line():
+    from greenplum_loader import database_message
+
+    class Opaque(Exception):
+        java_exception = object()                       # getMessage() is not there
+
+    exc = Opaque("An error occurred while calling o61.execute.\n"
+                 ": org.postgresql.util.PSQLException: ERROR: permission denied\n"
+                 "\tat org.postgresql.jdbc.PgStatement.execute")
+
+    assert database_message(exc) == \
+        "org.postgresql.util.PSQLException: ERROR: permission denied"
+
+
+def test_a_credential_in_an_error_is_never_echoed():
+    from greenplum_loader import database_message
+
+    message = database_message(RuntimeError(
+        'FATAL: password authentication failed (url=jdbc:postgresql://gp/db password=s3cr3t)'))
+
+    assert "s3cr3t" not in message
+    assert "password authentication failed" in message
+
+
+def test_a_failed_write_reports_the_database_message(cfg):
+    instance = GreenplumLoader(cfg)
+
+    class Exploding(FakeDataFrame):
+        @property
+        def write(self):
+            raise FakePy4JJavaError(FakeJavaException(
+                'ERROR: column "NOTES_5000" of relation "atm_ejournal_withdrawals" does not exist'))
+
+    with pytest.raises(GreenplumLoadError) as failure:
+        instance.write_dataframe(Exploding(), instance.table)
+
+    assert 'column "NOTES_5000"' in str(failure.value)
+    assert "An error occurred while calling" not in str(failure.value)
